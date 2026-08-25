@@ -59,7 +59,7 @@ MCP_Service/
 - [x] 建立專案資料夾 `MCP_Service`（與 `Docs/` 平行）
 - [x] 依「0. 程式碼架構模式」建立 `domain/` / `application/` / `infrastructure/` / `interface/` 資料夾骨架
 - [x] 初始化 Python 專案，安裝 `fastapi`, `firebase-admin`, `mcp` 等套件（`pyproject.toml` + `.venv`）—— 開發機僅有 Python 3.13.1，非規劃的 3.14；`pyproject.toml` 的 `requires-python` 後續依 GCE 部署主機實際鎖定的 3.10.12 改為 `>=3.10`（詳見 2.3 說明），開發機仍用 3.13 開發、不影響相容性
-- [x] 串接 Google Embedding API（`text-multilingual-embedding-002`）（3.2）—— `infrastructure/vertex_embedding_provider.py`，透過 `google-genai` SDK 以 `vertexai=True` 模式呼叫，沿用 1.1 已設定的 GCE 附加身分（ADC），程式碼已完成並通過 import 驗證，但**尚未實測真正呼叫**（本機非 GCE 環境無憑證）；正式測試需等 2.3 部署上線後進行，且**待確認**服務帳戶是否已授予 Vertex AI 存取角色（1.1 目前僅授權 Cloud Datastore User）
+- [x] 串接 Google Embedding API（`text-multilingual-embedding-002`）（3.2）—— `infrastructure/vertex_embedding_provider.py`，透過 `google-genai` SDK 以 `vertexai=True` 模式呼叫，沿用 1.1 已設定的 GCE 附加身分（ADC），程式碼已完成並通過 import 驗證，但**尚未實測真正呼叫**（本機非 GCE 環境無憑證）；正式測試需等 2.3 部署上線後進行。**Vertex AI 存取角色已補上**：`aiplatform.googleapis.com` API 已啟用，GCE 服務帳戶已於 2.3 授予 `roles/aiplatform.user`（透過 Cloud Shell `gcloud projects add-iam-policy-binding` 完成，主控台 IAM 角色搜尋 UI 一度找不到該角色，改走指令列解決）
 - [x] 串接 Gemini Flash API（供寫入閘門判定使用）（3.2、5.1）—— `infrastructure/gemini_gate_classifier.py`，同樣透過 `google-genai` + ADC 呼叫，內含基礎判定 prompt（NOOP/UPDATE/SUPERSEDE/ADD），限制與待確認事項同上一項；prompt 細節與門檻整合留待 Phase 2（2.1 save_memory）依實測調整
 - [x] 建立 `config.py`，集中管理以下起始參數（3.2、5.1、6.1）：
   - [x] `LOW_THRESHOLD = 0.85`（寫入閘門相似度低閾值）
