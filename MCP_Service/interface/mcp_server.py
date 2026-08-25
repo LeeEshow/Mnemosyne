@@ -20,7 +20,7 @@ from domain.models import Memory
 from infrastructure.firestore_memory_repository import FirestoreMemoryRepository
 from infrastructure.gemini_gate_classifier import GeminiGateClassifier
 from infrastructure.vertex_embedding_provider import VertexEmbeddingProvider
-from interface import connection_context, tool_schemas
+from interface import connection_context, key_auth_middleware, tool_schemas
 
 
 @asynccontextmanager
@@ -189,7 +189,10 @@ async def load_pinned_memories(
     return tool_schemas.SearchMemoriesResponse(memories=[_to_memory_view(m) for m in memories])
 
 
-app = connection_context.DomainBindingMiddleware(mcp_server.sse_app())
+app = key_auth_middleware.KeyAuthMiddleware(
+    connection_context.DomainBindingMiddleware(mcp_server.sse_app()),
+    expected_key=os.environ.get("MNEMOSYNE_MCP_KEY"),
+)
 
 
 def main() -> None:

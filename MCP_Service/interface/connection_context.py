@@ -1,5 +1,6 @@
 import contextvars
-from urllib.parse import parse_qs
+
+from interface.asgi_query import get_query_param
 
 _DOMAIN_QUERY_PARAM = "domain"
 
@@ -26,7 +27,7 @@ class DomainBindingMiddleware:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
-        token = _domain_var.set(_parse_domain(scope.get("query_string", b"")))
+        token = _domain_var.set(get_query_param(scope, _DOMAIN_QUERY_PARAM))
         try:
             await self._app(scope, receive, send)
         finally:
@@ -35,9 +36,3 @@ class DomainBindingMiddleware:
 
 def current_domain() -> str | None:
     return _domain_var.get()
-
-
-def _parse_domain(query_string: bytes) -> str | None:
-    params = parse_qs(query_string.decode())
-    values = params.get(_DOMAIN_QUERY_PARAM)
-    return values[0] if values else None
