@@ -137,8 +137,8 @@ MCP_Service/
   - 順帶一提：`google-api-core`（`firebase-admin` 的依賴）在 3.10 上會印出 FutureWarning，說明 Google 預計 **2026-10-04** 起新版 `google-api-core` 將不再支援 3.10，屆時若要跟進最新版套件會需要重新討論 Python 版本；目前不影響，先記錄
 - [x] **[PM]** GCE 新增 `mnemosyne.service`（systemd，`Type=simple`——與 `fastapi.service` 的 `Type=notify` 不同，因程式碼未整合 sd_notify），監聽 `:8001`（3.3.1）—— 程式 clone 於 `/app-mnemosyne`（獨立於 `/app`，Deploy Key 唯讀存取 Private repo）；`.env` 存 `MNEMOSYNE_MCP_KEY`/專案 ID/區域；已用 `curl` 本機驗證：無 key 回 401、帶正確 key 回 200 並正常輸出 SSE `session_id`
 - [x] **[PM]** GCE 新增防火牆規則開放 `tcp:8001`（3.3.1）—— `allow-uvicorn-8001`（比照 `allow-uvicorn-8000` 模式，`targetTags=http-server`），已從外部 `curl http://35.201.176.69:8001/sse` 驗證可連線（回 401，符合預期，代表防火牆通、金鑰驗證也正常擋下無憑證請求）
-- [ ] **[PM]** 修改 `fintarck-proxy` 的 `nginx.conf`，新增 `/mnemosyne/` location block 轉發至 `:8001`（3.3.1）
-- [ ] **[PM]** 透過 Cloud Run 重新部署 `fintarck-proxy`（待金鑰驗證邏輯合併後才執行——**SE 端已完成，可以進行**）
+- [x] **[PM]** 修改 `fintarck-proxy` 的 `nginx.conf`，新增 `/mnemosyne/` location block 轉發至 `:8001`（3.3.1）
+- [x] **[PM]** 透過 Cloud Run 重新部署 `fintarck-proxy` —— 部署完成後驗證：`/mnemosyne/sse` 回 401（正確轉發到 Mnemosyne，金鑰驗證正常）、既有 `/api/v1/health` 回 404 但為標準 FastAPI JSON 格式（代表理財後端路徑仍正常轉發，未受影響）
 
 > **範圍界定**：本次先完成**手動初次部署**（確認服務能實際跑起來），比照 NoCode_Project `deploy-python-backend.yml` 的 GitHub Actions CI/CD 自動化**延後到 2.5**，避免同時處理太多變數難以排查問題。
 
