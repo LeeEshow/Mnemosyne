@@ -30,7 +30,7 @@ class KeyAuthMiddleware:
         await self._app(scope, receive, send)
 
     def _is_authorized(self, provided_key: str | None) -> bool:
-        if self._expected_key is None or provided_key is None:
+        if not self._expected_key or not provided_key:
             return False
         return hmac.compare_digest(provided_key, self._expected_key)
 

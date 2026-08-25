@@ -2,7 +2,7 @@
 name = "mnemosyne-mcp"
 version = "0.1.0"
 description = "Mnemosyne MCP Server - 跨專案 AI 記憶服務"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
     "fastapi==0.141.1",
     "uvicorn[standard]==0.52.4",

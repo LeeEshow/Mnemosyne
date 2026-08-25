@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import config
 from domain.models import Memory, MemoryStatusFilter, ScoredMemory
@@ -95,7 +95,7 @@ class SearchMemoriesUseCase:
 
     def _rank_top(self, candidates: list[ScoredMemory], limit: int) -> list[ScoredMemory]:
         parameters = ScoringParameters(_SCORING_WEIGHTS, config.DECAY_LAMBDA, config.ACCESS_FREQUENCY_LOG_CAP)
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         ranked = sorted(candidates, key=lambda c: calculate_decay_score(c, now, parameters), reverse=True)
         return ranked[:limit]
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import config
 from domain.models import Memory, MemoryStatusFilter, ScoredMemory
@@ -103,7 +103,7 @@ class SaveMemoryUseCase:
             title=request.title,
             context=request.context,
             embedding=embedding,
-            created_at=datetime.now(UTC),
+            created_at=datetime.now(timezone.utc),
             importance_score=request.importance_score or config.DEFAULT_IMPORTANCE_SCORE,
             tags=request.tags,
             source_id=request.source_id,

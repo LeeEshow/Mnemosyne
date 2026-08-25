@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import firebase_admin
 from firebase_admin import firestore
@@ -84,7 +84,7 @@ class FirestoreMemoryRepository:
     async def record_access(self, memory_id: str) -> None:
         increment = firestore.Increment(1)
         await self._update(
-            memory_id, {"last_accessed_at": datetime.now(UTC), "access_count": increment}
+            memory_id, {"last_accessed_at": datetime.now(timezone.utc), "access_count": increment}
         )
 
     async def _update(self, memory_id: str, fields: dict) -> None:
