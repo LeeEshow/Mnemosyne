@@ -128,10 +128,13 @@ MCP_Service/
 
 - [x] **[SE]** 實作 `MNEMOSYNE_MCP_KEY` 存取金鑰驗證邏輯（比照既有 `MCP_ACCESS_KEY` 模式，query string 比對）—— `interface/key_auth_middleware.py`
   - [ ] **[SE][待修]** PM Review 發現：`_is_authorized` 只擋 `expected_key is None`，未擋空字串——若 `MNEMOSYNE_MCP_KEY` 被誤設為 `""`，`?key=`（空值）會通過 `hmac.compare_digest("", "")` 比對成功，跟文件聲稱的 fail-safe 語意不符。修正為 `if not self._expected_key or not provided_key: return False`。非阻斷性，可跟其他小修一起處理。
-- [ ] **[PM]** GCE 新增 `mnemosyne.service`（systemd），監聽 `:8001`（3.3.1）
+- [ ] **[PM]** 於 GCE 主機建立專屬 SSH Deploy Key（唯讀），供拉取 Mnemosyne Private repo（NoCode_Project 為 Public repo 免驗證，Mnemosyne 需另外設定）
+- [ ] **[PM]** GCE 新增 `mnemosyne.service`（systemd，`Type=simple`——與 `fastapi.service` 的 `Type=notify` 不同，因程式碼未整合 sd_notify），監聽 `:8001`（3.3.1）
 - [ ] **[PM]** GCE 新增防火牆規則開放 `tcp:8001`（3.3.1）
 - [ ] **[PM]** 修改 `fintarck-proxy` 的 `nginx.conf`，新增 `/mnemosyne/` location block 轉發至 `:8001`（3.3.1）
 - [ ] **[PM]** 透過 Cloud Run 重新部署 `fintarck-proxy`（待金鑰驗證邏輯合併後才執行——**SE 端已完成，可以進行**）
+
+> **範圍界定**：本次先完成**手動初次部署**（確認服務能實際跑起來），比照 NoCode_Project `deploy-python-backend.yml` 的 GitHub Actions CI/CD 自動化**延後到 2.5**，避免同時處理太多變數難以排查問題。
 
 > **[SE] 實作補充說明**：`KeyAuthMiddleware` 包在 `DomainBindingMiddleware` 外層（`app = KeyAuthMiddleware(DomainBindingMiddleware(mcp_server.sse_app()), ...)`），驗證失敗直接回 401、不進入 domain 綁定與工具邏輯。比對邏輯延續 2.2 已確認的限制：只在「還沒有 `session_id`」的請求（也就是建立 SSE 連線的 GET 請求，唯一會帶 `key` 的請求）上比對金鑰；`POST /messages/?session_id=...` 本身不帶 `key` 是 transport 本身的正常行為（同 domain 綁定），但因為 `session_id` 是 128-bit UUID4、且只有先通過驗證才拿得到，所以放行有 `session_id` 的請求不會開後門。用 `hmac.compare_digest` 比對避免時序攻擊；環境變數 `MNEMOSYNE_MCP_KEY` 未設定時走「fail-safe」——直接全部拒絕，不是當機也不是誤放行（刻意不在 import 當下拋錯，避免影響本機測試/未來的自動化測試）。
 > **已用真實 HTTP/SSE 驗證**：起真的 `uvicorn` server，分別用「不帶 key」「帶錯誤 key」「帶正確 key」三種情況實測連線，前兩者確認收到 401 且連線失敗，後者確認能完整走完 `initialize` 並成功呼叫工具；另外單獨驗證了 `MNEMOSYNE_MCP_KEY` 未設定時的 fail-safe 行為。
@@ -141,6 +144,10 @@ MCP_Service/
 - [ ] 以 `.../mnemosyne/mcp?key=<KEY>&domain=finance` 連線 Claude Desktop 或理財網頁，驗證跨 domain 檢索互相隔離
 - [ ] 驗證 `global` domain 的記憶能同時被 `coding` 與 `finance` 連線檢索到
 - [ ] 驗證寫入閘門三段判定邏輯（完全重複、明顯不同、模糊地帶各測一組案例）
+
+### 2.5 CI/CD 自動化（延後至手動部署驗證完成後）
+- [ ] 比照 `deploy-python-backend.yml` 新增 `deploy-mnemosyne.yml`：偵測 `MCP_Service/**` 變更 → SSH 進 GCE → `git pull`（沿用 2.3 建立的 Deploy Key）→ 安裝依賴 → `systemctl restart mnemosyne`
+- [ ] 設定對應 GitHub Secrets（可能沿用既有 `GCE_HOST` / `GCE_USER` / `GCE_SSH_KEY`，或視情況新增專屬金鑰）
 
 ---
 
