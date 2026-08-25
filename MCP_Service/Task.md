@@ -1,7 +1,46 @@
 # Mnemosyne MCP 開發項目清單 (Task List)
 
-> 依據 [Mnemosyne_MCP_Proposal.md](./Mnemosyne_MCP_Proposal.md) 的定案設計展開。每個任務後面的括號標註對應設計文件章節，實作時應回頭核對該章節的詳細規格。
+> 依據 [Mnemosyne_MCP_Proposal.md](../Docs/Mnemosyne_MCP_Proposal.md) 的定案設計展開。每個任務後面的括號標註對應設計文件章節，實作時應回頭核對該章節的詳細規格。
 > 勾選代表完成，未完成項目維持未勾選。
+
+---
+
+## 0. 程式碼架構模式（Architecture Pattern）
+
+> 討論脈絡：技術棧定案為 Python + FastAPI（見 Proposal 3.2），主要理由是與既有 `NoCode_Project`（fintarck-backend）共用 GCE 主機、部署模式一致，而非 Python 本身在 MCP 生態系上佔優勢——事實上 MCP 官方 TypeScript SDK 才是生態系主流。為了不把「未來若要換成 Node.js」的成本鎖死在框架選擇上，開發時採用 **Hexagonal Architecture（Ports & Adapters）**，把業務邏輯與 Python/GCP 框架細節實體隔離。此決策同時符合 dev-core-hub 團隊 Layer 1 開發原則中「核心業務邏輯內聚於 Domain 層」「Repository 介面宣告於 Domain 層」「依賴方向單向指向 Domain 核心」等規範。
+
+**目錄結構**：
+
+```
+MCP_Service/
+├── domain/                     # 零框架依賴，未來逐檔翻譯成 TS 即可
+│   ├── models.py                # Memory 等不可變值物件（frozen dataclass）
+│   ├── scoring.py                # 衰減排序公式（6.1）—— 純函式
+│   ├── write_gate_policy.py      # 三段式判定規則（5.1）—— 純函式 + 門檻常數
+│   └── ports/                    # 抽象介面（typing.Protocol）
+│       ├── memory_repository.py  # save / find_nearest / update 等介面
+│       ├── embedding_provider.py # embed(text) -> vector 介面
+│       └── gate_classifier.py    # classify(candidates) -> Decision 介面
+│
+├── application/                # Use case 協調層，依賴注入 port，無框架細節
+│   ├── save_memory_use_case.py
+│   ├── search_memories_use_case.py
+│   └── ...
+│
+├── infrastructure/              # 具體實作，綁死 Python/GCP —— 未來遷移只重寫這層
+│   ├── firestore_memory_repository.py
+│   ├── vertex_embedding_provider.py
+│   └── gemini_gate_classifier.py
+│
+└── interface/                   # MCP/FastAPI 入口，只做 I/O 轉換
+    ├── mcp_server.py             # tool 註冊、SSE transport
+    └── tool_schemas.py           # Pydantic model 僅存在這一層
+```
+
+**三條硬規則**：
+1. `domain/` 底下**禁止 import** FastAPI、Pydantic、firebase-admin、google-genai 等任何第三方框架/SDK，只能用標準庫。
+2. Port 一律用 `typing.Protocol` 定義（結構化介面），對應到 TS 就是直接寫成 `interface`。
+3. `interface/` 層（MCP tool handler）只做「解析輸入 → 呼叫 use case → 格式化輸出」，不寫任何業務判斷。
 
 ---
 
@@ -17,6 +56,8 @@
 - [x] 設定服務帳戶存取權（**改用 GCE 附加身分，非金鑰檔案**）：組織政策 `iam.disableServiceAccountKeyCreation` 禁止建立金鑰，改為將 GCE Compute Engine 預設服務帳戶（`1077248196503-compute@developer.gserviceaccount.com`）於 `mnemosyne-cb868` 專案 IAM 中授予 **Cloud Datastore User** 角色，跨專案存取 Firestore，免金鑰檔案，安全性優於原規劃
 
 ### 1.2 Python 專案初始化
+- [x] 建立專案資料夾 `MCP_Service`（與 `Docs/` 平行）
+- [ ] 依「0. 程式碼架構模式」建立 `domain/` / `application/` / `infrastructure/` / `interface/` 資料夾骨架
 - [ ] 初始化 Python 3.14 專案，安裝 `fastapi`, `firebase-admin`, `mcp` 等套件
 - [ ] 串接 Google Embedding API（`text-multilingual-embedding-002`）（3.2）
 - [ ] 串接 Gemini Flash API（供寫入閘門判定使用）（3.2、5.1）
