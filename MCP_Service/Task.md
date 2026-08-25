@@ -57,38 +57,68 @@ MCP_Service/
 
 ### 1.2 Python 專案初始化
 - [x] 建立專案資料夾 `MCP_Service`（與 `Docs/` 平行）
-- [ ] 依「0. 程式碼架構模式」建立 `domain/` / `application/` / `infrastructure/` / `interface/` 資料夾骨架
-- [ ] 初始化 Python 3.14 專案，安裝 `fastapi`, `firebase-admin`, `mcp` 等套件
-- [ ] 串接 Google Embedding API（`text-multilingual-embedding-002`）（3.2）
-- [ ] 串接 Gemini Flash API（供寫入閘門判定使用）（3.2、5.1）
-- [ ] 建立 `config.py`，集中管理以下起始參數（3.2、5.1、6.1）：
-  - [ ] `LOW_THRESHOLD = 0.85`（寫入閘門相似度低閾值）
-  - [ ] 衰減排序權重 `w1=0.50 / w2=0.25 / w3=0.15 / w4=0.10`
-  - [ ] 衰減常數 `λ ≈ 0.0077`（半衰期 90 天，以天為單位）
-  - [ ] 向量查詢 K 值：domain 軌道 K=40、global 軌道 K=10（5.2）
-  - [ ] 常駐清單預設上限 `limit=5`（5.6）
+- [x] 依「0. 程式碼架構模式」建立 `domain/` / `application/` / `infrastructure/` / `interface/` 資料夾骨架
+- [x] 初始化 Python 專案，安裝 `fastapi`, `firebase-admin`, `mcp` 等套件（`pyproject.toml` + `.venv`）—— 開發機僅有 Python 3.13.1，非規劃的 3.14，`pyproject.toml` 已改為 `requires-python = ">=3.13"`，待正式環境確認 3.14 可用性後再評估是否升級
+- [x] 串接 Google Embedding API（`text-multilingual-embedding-002`）（3.2）—— `infrastructure/vertex_embedding_provider.py`，透過 `google-genai` SDK 以 `vertexai=True` 模式呼叫，沿用 1.1 已設定的 GCE 附加身分（ADC），程式碼已完成並通過 import 驗證，但**尚未實測真正呼叫**（本機非 GCE 環境無憑證）；正式測試需等 2.3 部署上線後進行，且**待確認**服務帳戶是否已授予 Vertex AI 存取角色（1.1 目前僅授權 Cloud Datastore User）
+- [x] 串接 Gemini Flash API（供寫入閘門判定使用）（3.2、5.1）—— `infrastructure/gemini_gate_classifier.py`，同樣透過 `google-genai` + ADC 呼叫，內含基礎判定 prompt（NOOP/UPDATE/SUPERSEDE/ADD），限制與待確認事項同上一項；prompt 細節與門檻整合留待 Phase 2（2.1 save_memory）依實測調整
+- [x] 建立 `config.py`，集中管理以下起始參數（3.2、5.1、6.1）：
+  - [x] `LOW_THRESHOLD = 0.85`（寫入閘門相似度低閾值）
+  - [x] 衰減排序權重 `w1=0.50 / w2=0.25 / w3=0.15 / w4=0.10`
+  - [x] 衰減常數 `λ ≈ 0.0077`（半衰期 90 天，以天為單位）
+  - [x] 向量查詢 K 值：domain 軌道 K=40、global 軌道 K=10（5.2）
+  - [x] 常駐清單預設上限 `limit=5`（5.6）
 
 ---
 
 ## Phase 2：MCP Server 開發與部署
 
 ### 2.1 核心工具實作（5 章）
-- [ ] `save_memory`：三段式同步寫入閘門（字串完全相同 → NOOP；相似度 <0.85 → ADD；0.85~1.0 → 呼叫 Gemini Flash 判定 NOOP/UPDATE/SUPERSEDE/ADD）（5.1）
-  - [ ] `UPDATE` 分支需重新計算並覆寫 `embedding`
-  - [ ] `SUPERSEDE` 分支需寫入 `superseded_by`
-- [ ] `search_memories`：雙軌並行檢索 + 衰減排序（5.2、6.1）
-  - [ ] 向量軌道：`asyncio.gather` 並行查詢 `domain` 與 `global`
-  - [ ] 精確匹配軌道：`tags array-contains-any exact_tags`
-  - [ ] 合併去重 → 套用衰減排序公式 → 回傳 Top-K
-  - [ ] 支援 `include_superseded` / `include_archived` 深度搜尋開關
-  - [ ] 命中記憶更新 `last_accessed_at` / `access_count`
-- [ ] `forget_memory`：預設軟刪除（`status="archived"`），`hard_delete=true` 才真刪（5.3）
-- [ ] `pin_memory` / `unpin_memory`：更新 `is_pinned`（5.5）
-- [ ] `load_pinned_memories`：查詢 `is_pinned==true` 常駐清單（5.6）
+
+> **Tool Description 定稿**（撰寫原則見 Proposal 5.0，直接供 `interface/tool_schemas.py` 使用；措辭如有調整以此處為準）：
+>
+> - **`save_memory`**：「當對話中出現值得長期保存的新事實、重要決策、個人偏好或代碼知識點時呼叫。已內建重複偵測與合併更新機制，若只是要新增資訊，呼叫前不需要先以 search_memories 確認是否重複。如果是任務完成後的經驗反思，請改用 reflect_on_task。注意：寫入範圍將自動被綁定在當前連線的領域下。」
+>   - `tags` 參數：「(array of strings, optional) 關聯的標籤數組。如果記憶內容涉及特定的技術術語、錯誤代碼（如 'ERR_CORS'）、函式名（如 'get_user'）、股票代號（如 '0056'）等精確字串，務必將這些關鍵字也作為獨立的標籤存入此陣列，以利日後進行精確匹配檢索。」
+> - **`search_memories`**：「當使用者的提問涉及過去的討論、決策、偏好，或你需要當前對話沒有的歷史脈絡時呼叫。注意：你的檢索範圍已自動鎖定於當前連線的領域與全域通用偏好（例如回覆語言格式），查無結果不代表使用者從未提過，可能只是超出目前可讀取的範圍。若查詢包含特定的錯誤代碼、函式名、股票代號等精確字串，請務必填入 exact_tags 參數以確保字面精確命中。」
+>   - `exact_tags` 參數：「(array of strings, optional) 需要精確比對的關鍵字，用於觸發精確匹配軌道，彌補向量檢索對精確字串比對能力較弱的問題。當查詢中包含精確的技術字串（如錯誤代碼 'ERR_404'、函式名稱 'calculate_tax'、股票代號 '0056' 等）時，務必將這些關鍵字傳入此參數。」
+> - **`reflect_on_task`**：「當一項任務取得明確結果（測試通過、部署成功、修法失敗需回退等），且該結果帶有可類推的經驗教訓時，於回報結果的同一回合呼叫；或當使用者切換到全新話題、而前一個話題確實是一項已收斂的任務或決策時，先呼叫此工具收尾再回覆新話題。純粹的問答、閒聊、或沒有意外/教訓價值的例行成功動作不需要呼叫。與 save_memory 的差異：這是任務執行結果的回顧，不是討論中即時記錄的事實或偏好。」（觸發時機仍屬未驗證的啟發式規則，見下方 Phase 3 待確認事項）
+> - **`forget_memory`**：「將某筆不再正確或已無用的記憶進行封存或刪除。你必須先使用 search_memories 檢索該記憶，以取得其 doc_id 後才能呼叫此工具。」
+> - **`pin_memory`**：「將某筆記憶標記為常駐記憶，確保其之後一定會出現在對話開頭的常駐清單（load_pinned_memories）中。只在該記憶被判定為『極端重要、不能被一般排序稀釋』時使用，避免濫用造成常駐清單膨脹。你必須先使用 search_memories 檢索該記憶，以取得其 doc_id 後才能呼叫。」
+> - **`unpin_memory`**：「取消某筆記憶的常駐標記。你必須先知道該記憶的 doc_id（可透過 search_memories 或既有的常駐清單得知）才能呼叫。」
+> - **`load_pinned_memories`**：「對話開始時呼叫一次，取得少量常駐記憶直接帶入上下文；不需要在同一次對話中重複呼叫多次。」
+
+- [x] `save_memory`：三段式同步寫入閘門（字串完全相同 → NOOP；相似度 <0.85 → ADD；0.85~1.0 → 呼叫 Gemini Flash 判定 NOOP/UPDATE/SUPERSEDE/ADD）（5.1）—— `domain/write_gate_policy.py`（純函式）+ `application/save_memory_use_case.py`（協調）
+  - [x] `UPDATE` 分支需重新計算並覆寫 `embedding`
+  - [x] `SUPERSEDE` 分支需寫入 `superseded_by`
+- [x] `search_memories`：雙軌並行檢索 + 衰減排序（5.2、6.1）—— `domain/scoring.py` + `application/search_memories_use_case.py`
+  - [x] 向量軌道：`asyncio.gather` 並行查詢 `domain` 與 `global`
+  - [x] 精確匹配軌道：`tags array-contains-any exact_tags`
+  - [x] 合併去重 → 套用衰減排序公式 → 回傳 Top-K
+  - [x] 支援 `include_superseded` / `include_archived` 深度搜尋開關
+  - [x] 命中記憶更新 `last_accessed_at` / `access_count`
+- [x] `forget_memory`：預設軟刪除（`status="archived"`），`hard_delete=true` 才真刪（5.3）
+- [x] `pin_memory` / `unpin_memory`：更新 `is_pinned`（5.5）
+- [x] `load_pinned_memories`：查詢 `is_pinned==true` 常駐清單（5.6）
+
+> **實作補充說明**：以上 5 個工具已在 `interface/mcp_server.py` 完整註冊（含 Tool Description 與參數 schema），並以假物件（fake repository/embedding/classifier）跑過端到端整合測試驗證全部分支（ADD/NOOP/雙軌合併/exact_tags/pin/unpin/軟刪除/硬刪除），管線邏輯正確；但**尚未對接真實 GCP**（本機無 ADC，同 1.2 的已知限制）。過程中補了幾個 Proposal 未明訂細節的實作決策，記錄於此供之後檢視：
+> - `GateClassifier.classify()` 改為回傳 `GateVerdict`（決定 + 合併後標題/內容），而非單純決定值——因為 `UPDATE` 分支需要「合併後的內容」才能重新計算 embedding，設計為 Gemini 在判定 UPDATE 的同一次呼叫中一併輸出合併內容（`infrastructure/gemini_gate_classifier.py` 用 `response_schema` 結構化輸出），避免多一次 LLM 呼叫。
+> - 寫入閘門查詢最近鄰數量取 `WRITE_GATE_CANDIDATE_LIMIT=1`（僅取單一最近鄰），對應 5.1「最近鄰相似度」的字面單數解讀；`config.py` 已留常數，之後若發現需要比對多個候選可再調整。
+> - 字串完全相同的「正規化」規則（5.1 未定義細節）暫定為 trim + 轉小寫 + 摺疊空白（`normalize_for_exact_match`）。
+> - 衰減排序中 `importance_score`（1-10）正規化為 `(score-1)/9`；`access_frequency` 採 `log1p(count)/log1p(cap)` 對數縮放，`cap` 新增常數 `ACCESS_FREQUENCY_LOG_CAP=20`（6.1 僅說明「對數縮放與正規化」未給精確公式/上限，此為暫定值，待實測調整）。
+> - 精確匹配軌道（`exact_tags`）比照向量軌道延伸為 domain + global 雙軌並行查詢（5.2 原文未明講是否比照雙軌，此處基於 domain/global 隔離設計精神統一），命中僅靠標籤、無向量相似度者，衰減公式的 relevance 分量以 `1.0` 代入。
+> - Firestore 查詢策略：`find_nearest` 依 `status_filter` 展開的每個狀態各發一次向量查詢再合併（對應 4.1 唯一複合索引 `domain+status+embedding`，避開 `status IN [...]` 與向量查詢混用的相容性風險）；`find_by_tags`／`find_pinned` 則刻意只用單欄位查詢（`tags array-contains-any` / `domain ==`），`domain`/`status`/`is_pinned` 過濾全部下放到 Python 端做，避免額外複合索引需求（比照 4.1 對 tags track 的設計精神）。**這個假設（多重 equality 過濾在應用層而非 DB 端做）待 2.4 實際打 Firestore 時應一併驗證是否真的完全不需要新建索引。**
+> - `interface/mcp_server.py` 目前用環境變數 `MNEMOSYNE_DOMAIN` 暫代 `domain` 綁定（`_resolve_domain()`），這是 2.2 尚未實作前的權宜作法，2.2 完成後需替換為真正的連線層級 URL 解析。
+> - `reflect_on_task` 未實作，維持 Task.md 既有安排歸入 Phase 3。
+> - 同 1.2：服務帳戶是否已有 Vertex AI 存取權限仍待確認（目前僅授權 Cloud Datastore User）。
 
 ### 2.2 連線層級 domain 綁定
-- [ ] 實作從 MCP 連線 URL 的 query string 解析 `domain`（3.3）
-- [ ] 確保單一連線建立後，該連線後續所有 tool 呼叫自動套用綁定的 `domain`，不需 AI 每次傳入
+- [x] 實作從 MCP 連線 URL 的 query string 解析 `domain`（3.3）—— `interface/connection_context.py`
+- [x] 確保單一連線建立後，該連線後續所有 tool 呼叫自動套用綁定的 `domain`，不需 AI 每次傳入
+
+> **實作補充說明**：這個功能比預期棘手，記錄一下走過的彎路避免以後重踩。原本想法很直覺——用一個 `contextvars.ContextVar` 在 ASGI middleware 讀 query string 綁一次，以為後續同連線的 tool 呼叫都在同一個 asyncio task 底下執行就能一路讀到；實測發現完全不成立，追進 MCP SDK（`mcp==2.1.0`）原始碼後確認是刻意設計如此：SSE transport 建立連線時的 GET 請求（帶完整 query string，含 `domain`）之後，同一連線的每一次工具呼叫其實是走另一支 `POST /messages/?session_id=...`（只帶 `session_id`，不帶 `domain`），而 SDK 內部（`mcp.server.runner._sender_context`）會用「訊息送入當下」的 context 覆寫掉執行環境，所以工具呼叫當下讀到的 contextvars 其實是那次 POST 請求自己的（`domain` 必為空），不是原本 GET 連線時綁的值。
+> 最後採用的正確機制是 `MCPServer(lifespan=...)`：這個 lifespan 是在每次 SSE 連線建立（也就是那次帶 `domain` 的 GET 請求）當下進入一次，其回傳值會經由 `ctx.request_context.lifespan_context` 傳給該連線後續所有工具呼叫，不受上述訊息級 context 覆寫影響。所以最終設計是：`connection_context.DomainBindingMiddleware`（ASGI 層）在請求進來時把 query string 的 `domain` 綁進 `contextvars`，`mcp_server.py` 的 `_bind_connection_domain`（lifespan）在連線建立當下讀走這個值並包進 `lifespan_context`，各工具再透過 `ctx: Context` 參數的 `_resolve_domain(ctx)` 取得。
+> **已用真實 HTTP/SSE 驗證**（非假物件）：起一個真的 `uvicorn` server，用 `mcp.client.sse` 開兩條並行連線（`?domain=coding` / `?domain=finance`），互相呼叫 `load_pinned_memories`，確認彼此只看得到自己 domain 的資料、完全沒有互相污染；另外重複建立/關閉連線多次確認新連線不會殘留舊連線的綁定。這是目前整個專案裡驗證得最扎實的一塊。
+> 副作用：`interface/mcp_server.py` 的 ASGI 進入點也一併定案為 `app`（`DomainBindingMiddleware` 包住 `mcp_server.sse_app()`），`main()` 改用 `uvicorn.run(app, port=config.SERVER_PORT)`（對應 3.3.1 的 `:8001`），2.3 的 systemd 設定可以直接指向這個 `app`。
+> 待確認：`key`（`MNEMOSYNE_MCP_KEY`）身分驗證完全還沒做，仍屬 2.3 範圍。
 
 ### 2.3 部署上線
 - [ ] GCE 新增 `mnemosyne.service`（systemd），監聽 `:8001`（3.3.1）
@@ -107,7 +137,7 @@ MCP_Service/
 
 ## Phase 3：記憶自動精煉與經驗學習
 
-> ⚠️ **待確認事項**：`reflect_on_task` 與「對話中自動判斷該不該存」的具體觸發規則目前仍是「由 AI 自行判斷」，尚未定義成可執行的明確條件。動工前建議先補一輪討論，定義具體觸發時機（例如：每完成一個明確任務就呼叫、或由使用者訊息中的特定信號觸發）。
+> ⚠️ **待確認事項**：2.1 節已為 `reflect_on_task` 定稿了具體的操作時機（結果驅動 + 話題轉換前收尾兩種 hook），但這仍是**未經實測驗證的啟發式規則**，高度依賴實際運作時 AI 的敏感度——可能發生「過度反思」（把瑣碎成功也當作教訓寫入）或「忘記反思」（AI 沒抓到 hook 時機）。動工後需在 2.4 整合測試階段實際觀察觸發頻率與品質，回頭調整措辭。
 
 - [ ] 設計 Agent prompt 範本，引導 AI 在對話中自動判斷「值得存」的時機並精煉成 ≤500 字摘要（含 `why` / `how_to_apply` 結構）
 - [ ] 實作「會議記錄存檔」自動觸發流程
