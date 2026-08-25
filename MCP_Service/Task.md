@@ -121,11 +121,16 @@ MCP_Service/
 > 待確認：`key`（`MNEMOSYNE_MCP_KEY`）身分驗證完全還沒做，仍屬 2.3 範圍。
 
 ### 2.3 部署上線
-- [ ] GCE 新增 `mnemosyne.service`（systemd），監聽 `:8001`（3.3.1）
-- [ ] GCE 新增防火牆規則開放 `tcp:8001`（3.3.1）
-- [ ] 修改 `fintarck-proxy` 的 `nginx.conf`，新增 `/mnemosyne/` location block 轉發至 `:8001`（3.3.1）
-- [ ] 透過 Cloud Run 重新部署 `fintarck-proxy`
-- [ ] 設定 `MNEMOSYNE_MCP_KEY` 存取金鑰（比照既有 `MCP_ACCESS_KEY` 模式）
+
+> ⚠️ **待 SE 補做的前置項**：`interface/mcp_server.py` / `interface/connection_context.py` 目前只有 `domain` 綁定的 middleware，**完全沒有 `MNEMOSYNE_MCP_KEY` 的驗證邏輯**——任何人知道網址就能連線，無存取控制。PM 與使用者已確認順序：**先由 SE 補上金鑰驗證，再一起部署**，避免部署兩次（先上無驗證版本、之後又要為了加驗證重新 redeploy）。以下 GCP 側步驟（systemd/防火牆/Nginx/Cloud Run）與金鑰驗證程式碼可以並行準備，但**正式上線（Cloud Run 重新部署）需等驗證邏輯合併後**才進行，避免服務曝露在無驗證狀態。
+>
+> 建議實作方式（供 SE 參考，非強制）：在 `DomainBindingMiddleware` 同一層或新增一個 ASGI middleware，於請求進入時比對 query string 的 `key` 是否等於環境變數 `MNEMOSYNE_MCP_KEY`，不符則回應 401/403 並中斷，不進入後續 domain 綁定與工具邏輯。
+
+- [ ] **[SE]** 實作 `MNEMOSYNE_MCP_KEY` 存取金鑰驗證邏輯（比照既有 `MCP_ACCESS_KEY` 模式，query string 比對）
+- [ ] **[PM]** GCE 新增 `mnemosyne.service`（systemd），監聽 `:8001`（3.3.1）
+- [ ] **[PM]** GCE 新增防火牆規則開放 `tcp:8001`（3.3.1）
+- [ ] **[PM]** 修改 `fintarck-proxy` 的 `nginx.conf`，新增 `/mnemosyne/` location block 轉發至 `:8001`（3.3.1）
+- [ ] **[PM]** 透過 Cloud Run 重新部署 `fintarck-proxy`（待金鑰驗證邏輯合併後才執行）
 
 ### 2.4 整合測試
 - [ ] 以 `.../mnemosyne/mcp?key=<KEY>&domain=coding` 連線 Cursor，測試 `save_memory`/`search_memories`
