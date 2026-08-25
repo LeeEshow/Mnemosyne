@@ -128,7 +128,8 @@ MCP_Service/
 
 - [x] **[SE]** 實作 `MNEMOSYNE_MCP_KEY` 存取金鑰驗證邏輯（比照既有 `MCP_ACCESS_KEY` 模式，query string 比對）—— `interface/key_auth_middleware.py`
   - [ ] **[SE][待修]** PM Review 發現：`_is_authorized` 只擋 `expected_key is None`，未擋空字串——若 `MNEMOSYNE_MCP_KEY` 被誤設為 `""`，`?key=`（空值）會通過 `hmac.compare_digest("", "")` 比對成功，跟文件聲稱的 fail-safe 語意不符。修正為 `if not self._expected_key or not provided_key: return False`。非阻斷性，可跟其他小修一起處理。
-- [ ] **[PM]** 於 GCE 主機建立專屬 SSH Deploy Key（唯讀），供拉取 Mnemosyne Private repo（NoCode_Project 為 Public repo 免驗證，Mnemosyne 需另外設定）
+- [x] **[PM]** 於 GCE 主機建立專屬 SSH Deploy Key（唯讀），供拉取 Mnemosyne Private repo（NoCode_Project 為 Public repo 免驗證，Mnemosyne 需另外設定）—— `~/.ssh/mnemosyne_deploy` + SSH config alias `github-mnemosyne`，已驗證連線成功，並將 `/app-mnemosyne` clone 下來
+- [ ] **[SE][阻塞中]** `fintarck-backend` 主機 Python 為 **3.10.12**，且**刻意鎖定於此版本**（NoCode_Project 先前處理過相容性問題後維持在 3.10.12，不可為了 Mnemosyne 去動這台主機的 Python 安裝，見 PM 記憶 `project_gce_python_pinned`）。但目前程式碼有 3 處使用 `from datetime import UTC`（Python 3.11+ 限定）：`application/save_memory_use_case.py`、`application/search_memories_use_case.py`、`infrastructure/firestore_memory_repository.py`，在 3.10 上會直接 `ImportError`。請改用 `from datetime import timezone` 並以 `timezone.utc` 取代 `UTC`（行為相同，相容 3.10+）；同時請檢查專案內是否還有其他 3.11+/3.12+ 限定語法（`match` 陳述式、PEP 695 泛型語法 `def f[T]()`、`except*` 等），一併改寫或確認未使用。修正後請把 `pyproject.toml` 的 `requires-python` 從 `>=3.13` 改為反映實際最低需求（目前看來可以是 `>=3.10`，但仍需視 `mcp`/`google-genai`/`firebase-admin` 等第三方套件自身的最低 Python 需求而定，若套件本身不支援 3.10 則需另外討論）。
 - [ ] **[PM]** GCE 新增 `mnemosyne.service`（systemd，`Type=simple`——與 `fastapi.service` 的 `Type=notify` 不同，因程式碼未整合 sd_notify），監聽 `:8001`（3.3.1）
 - [ ] **[PM]** GCE 新增防火牆規則開放 `tcp:8001`（3.3.1）
 - [ ] **[PM]** 修改 `fintarck-proxy` 的 `nginx.conf`，新增 `/mnemosyne/` location block 轉發至 `:8001`（3.3.1）
