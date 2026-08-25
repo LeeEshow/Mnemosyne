@@ -135,7 +135,7 @@ MCP_Service/
   - `pyproject.toml` 的 `requires-python` 從 `>=3.13` 改為 `>=3.10`
   - 三方套件相容性：`fastapi`/`uvicorn`/`mcp`/`google-genai`/`python-dotenv` 宣告 `Requires-Python >=3.10`，`firebase-admin`/`pydantic` 更寬鬆（`>=3.9`），全部相容；transitive 依賴 `rpds-py`（經由 `jsonschema`）在本機 3.13 環境解析到的版本雖標示 `>=3.11`，但這只是 pip 針對 3.13 選了較新版本，非 3.10 不可用——已用 WSL 裝一份**乾淨的 Python 3.10.20**（deadsnakes PPA，純測試沙箱，非 GCE 機器）實際 `pip install` 全部鎖定版本並跑過完整 import 與 MCP 工具註冊測試，確認 `rpds-py` 在 3.10 上會自動解析到相容版本（`0.30.0`），一切正常
   - 順帶一提：`google-api-core`（`firebase-admin` 的依賴）在 3.10 上會印出 FutureWarning，說明 Google 預計 **2026-10-04** 起新版 `google-api-core` 將不再支援 3.10，屆時若要跟進最新版套件會需要重新討論 Python 版本；目前不影響，先記錄
-- [ ] **[PM]** GCE 新增 `mnemosyne.service`（systemd，`Type=simple`——與 `fastapi.service` 的 `Type=notify` 不同，因程式碼未整合 sd_notify），監聽 `:8001`（3.3.1）
+- [x] **[PM]** GCE 新增 `mnemosyne.service`（systemd，`Type=simple`——與 `fastapi.service` 的 `Type=notify` 不同，因程式碼未整合 sd_notify），監聽 `:8001`（3.3.1）—— 程式 clone 於 `/app-mnemosyne`（獨立於 `/app`，Deploy Key 唯讀存取 Private repo）；`.env` 存 `MNEMOSYNE_MCP_KEY`/專案 ID/區域；已用 `curl` 本機驗證：無 key 回 401、帶正確 key 回 200 並正常輸出 SSE `session_id`
 - [ ] **[PM]** GCE 新增防火牆規則開放 `tcp:8001`（3.3.1）
 - [ ] **[PM]** 修改 `fintarck-proxy` 的 `nginx.conf`，新增 `/mnemosyne/` location block 轉發至 `:8001`（3.3.1）
 - [ ] **[PM]** 透過 Cloud Run 重新部署 `fintarck-proxy`（待金鑰驗證邏輯合併後才執行——**SE 端已完成，可以進行**）
