@@ -8,6 +8,7 @@ from mcp_types import Tool as MCPTool
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 
 import config
 from application.forget_memory_use_case import ForgetMemoryRequest, ForgetMemoryUseCase
@@ -295,8 +296,28 @@ async def register_domain(
     )
 
 
+def _get_transport_security() -> TransportSecuritySettings | None:
+    disable_protection = os.environ.get("MNEMOSYNE_DISABLE_DNS_REBINDING_PROTECTION", "").lower() in ("true", "1", "yes")
+    if disable_protection:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+    allowed_hosts_str = os.environ.get("MNEMOSYNE_ALLOWED_HOSTS")
+    if allowed_hosts_str:
+        allowed_hosts = [h.strip() for h in allowed_hosts_str.split(",") if h.strip()]
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts,
+        )
+    return None
+
+
+security_settings = _get_transport_security()
+sse_app_kwargs = {}
+if security_settings is not None:
+    sse_app_kwargs["transport_security"] = security_settings
+
 app = key_auth_middleware.KeyAuthMiddleware(
-    mcp_server.sse_app(),
+    mcp_server.sse_app(**sse_app_kwargs),
     expected_key=os.environ.get("MNEMOSYNE_MCP_KEY"),
 )
 
