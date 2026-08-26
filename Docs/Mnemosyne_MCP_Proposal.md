@@ -97,7 +97,7 @@ graph TD
 * **協定標準**：Model Context Protocol (MCP) SDK，傳輸方式採 **Streamable HTTP**（單一 `/mcp` 端點，取代原規劃的 SSE transport——實測發現 SSE transport 在 `/mnemosyne/` 路徑前綴的反向代理下會因相對路徑重導向解析錯誤而失敗，詳見 `MCP_Service/CLAUDE.md`），不使用 Stdio。
 * **資料庫**：Firebase/Google Cloud Firestore (Spark 免費方案，含 50k 每日免費讀取、20k 寫入、1 GiB 空間)
 * **向量索引**：Firestore Native Vector Search (支援 HNSW 演算法、餘弦相似度)
-* **Embedding 模型**：**Google `text-multilingual-embedding-002` (768維，Vertex AI) / `text-embedding-004`（個人 Google AI Studio 訂閱）二擇一（定案，依環境變數 `GEMINI_API_KEY` 是否設定切換，見下方待辦與 `MCP_Service/CLAUDE.md`）**。理由：與 Firestore/GCE 同屬 GCP 生態系可共用憑證；對繁體中文的語意理解足夠且經過 multilingual 優化。⚠️ 兩個模型的向量空間不相容，切換後既有記憶的 `embedding` 全部失效，需清空重新寫入。
+* **Embedding 模型**：**Google `text-multilingual-embedding-002` (768維，Vertex AI) / `gemini-embedding-001`（原生 3072 維，Matryoshka 截斷至 1536 維以符合 Firestore 向量索引 2048 維上限，個人 Google AI Studio 訂閱）二擇一（定案，依環境變數 `GEMINI_API_KEY` 是否設定切換，見下方待辦與 `MCP_Service/CLAUDE.md`）**。理由：與 Firestore/GCE 同屬 GCP 生態系可共用憑證；對繁體中文的語意理解足夠且經過 multilingual 優化。⚠️ 兩個模型的向量空間不相容，切換後既有記憶的 `embedding` 全部失效，需清空重新寫入；目前實務上已全面採用 `GEMINI_API_KEY` 路徑，Vertex AI 路徑因索引維度已改動而暫不可用。
 * **寫入閘門判定 LLM**：**Gemini Flash 系列**（定案，同樣依 `GEMINI_API_KEY` 在 Vertex AI / 個人 Google AI Studio 訂閱間切換）。理由：NOOP/UPDATE/SUPERSEDE/CONFLICT_DETECTED/ADD 五選一分類任務不需要強推理能力，Gemini Flash 速度快、成本低，且同屬 GCP 生態系可共用憑證，不需額外引入 Anthropic/OpenAI API Key 造成跨雲依賴。若日後實測判斷品質不穩定，可再替換，抽換成本低。
 
 > ⚠️ **待辦（部署階段發現，已部分解決）**：Vertex AI（embedding + Gemini Flash 判定）與 Firestore Spark 方案不同，即使用量落在免費額度內，專案本身仍必須掛上有效計費帳戶才能呼叫，否則一律 `403 PERMISSION_DENIED (BILLING_DISABLED)`。已改為優先使用個人 Google AI Studio 訂閱的 `GEMINI_API_KEY`（走個人訂閱額度，不再計入 GCP 帳單），`mnemosyne-cb868` 目前仍掛著帳單帳戶作為 `GEMINI_API_KEY` 未設定時的退路，之後可視情況評估是否要移除。

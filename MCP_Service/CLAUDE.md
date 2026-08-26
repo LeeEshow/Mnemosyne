@@ -185,10 +185,24 @@ account). This was a deliberate switch to move AI usage cost off GCP billing and
 subscription — not a fallback/dev-mode toggle, so don't "clean it up" by removing the Vertex branch.
 
 **Embedding model is tied to which client mode is active and the two are not interchangeable.**
-`config.EMBEDDING_MODEL` resolves to `text-embedding-004` (Google AI Studio) when `GEMINI_API_KEY` is set,
-or `text-multilingual-embedding-002` (Vertex AI) otherwise — these produce vectors in different embedding
-spaces, so **switching `GEMINI_API_KEY` on or off after any memories already exist invalidates every stored
-`embedding` field**: old vectors were computed by the other model and are no longer comparable to new
-queries. There is no migration path for this — the fix is wiping and re-adding memories after a switch, not
-recomputing embeddings in place. If billing is ever a concern again, deciding whether to touch
-`GEMINI_API_KEY` should factor in this cost, not just the Vertex AI dollar amount.
+`config.EMBEDDING_MODEL` resolves to `gemini-embedding-001` (Google AI Studio — the older `text-embedding-004`
+name doesn't exist on this API surface; `client.models.list()` filtered to `embedContent` support is the way
+to check what's actually available) when `GEMINI_API_KEY` is set, or `text-multilingual-embedding-002`
+(Vertex AI, 768 dimensions) otherwise. `gemini-embedding-001` natively outputs **3072** dimensions, but
+**Firestore's vector index has a hard cap of 2048 dimensions** — exceeding it fails index creation with
+`INVALID_ARGUMENT: Invalid dimension ... must be ... less than or equal to 2048`. `VertexEmbeddingProvider`
+requests a Matryoshka-truncated `output_dimensionality=config.EMBEDDING_DIMENSION` (1536) via
+`types.EmbedContentConfig` when using the API-key client, and the Firestore composite index (`memories`
+collection, `domain (ASC) + status (ASC) + embedding (Vector)`) was recreated at `dimension: 1536` to match.
+**This means the Vertex AI fallback branch is currently non-functional**: `text-multilingual-embedding-002`
+only outputs 768 dimensions (no truncation support), which no longer matches the 1536-dim index. It's kept
+in the code for structural symmetry and as a starting point if this ever needs reworking, but don't expect
+the "unset `GEMINI_API_KEY`" path to actually work without also reverting the index (delete the current one,
+`gcloud firestore indexes composite create` with `dimension: "768"`) or finding a Vertex model/config that
+supports matching output dimensionality.
+
+Switching `GEMINI_API_KEY` on/off, or changing which embedding model is active, invalidates every stored
+`embedding` field — old vectors were computed by a different model/dimensionality and aren't comparable to
+new queries. There is no in-place migration for this; the fix is wiping and re-adding memories after a
+switch, not recomputing embeddings. Given the above, in practice this project is currently committed to the
+Google AI Studio path — treat that as the standing assumption, not a togglable option.

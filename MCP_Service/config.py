@@ -7,9 +7,13 @@ GOOGLE_CLOUD_LOCATION = os.environ.get("MNEMOSYNE_GOOGLE_CLOUD_LOCATION", "asia-
 GEMINI_CLASSIFIER_LOCATION = os.environ.get("MNEMOSYNE_GEMINI_CLASSIFIER_LOCATION", "us-central1")
 
 # 模型名稱依是否設定 GEMINI_API_KEY 連動：走個人 Google AI Studio 訂閱時，
-# 用該平台的向量模型（跟 Vertex AI 的 text-multilingual-embedding-002 向量空間不相容，
-# 兩者不可混用；切換模型代表既有記憶的 embedding 全部要重新計算，見 CLAUDE.md）。
-EMBEDDING_MODEL = "text-embedding-004" if os.environ.get("GEMINI_API_KEY") else "text-multilingual-embedding-002"
+# 用該平台的向量模型 gemini-embedding-001（原生輸出 3072 維，但 Firestore 向量索引維度上限
+# 是 2048，故用 Matryoshka 截斷輸出到 EMBEDDING_DIMENSION=1536，索引也建在這個維度上）；
+# 未設定則退回 Vertex AI 的 text-multilingual-embedding-002（固定輸出 768 維，不支援截斷）。
+# ⚠️ 索引已改成 1536 維後，Vertex AI 這條路徑目前實際上已不可用（維度對不上），除非之後
+# 另外調整索引或改用支援指定輸出維度的 Vertex 模型，見 CLAUDE.md。
+EMBEDDING_MODEL = "gemini-embedding-001" if os.environ.get("GEMINI_API_KEY") else "text-multilingual-embedding-002"
+EMBEDDING_DIMENSION = 1536
 GATE_CLASSIFIER_MODEL = "gemini-2.5-flash"
 
 FIRESTORE_ARRAY_CONTAINS_ANY_LIMIT = 10
