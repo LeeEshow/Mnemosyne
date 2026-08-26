@@ -93,7 +93,7 @@ graph TD
 ```
 
 ### 3.2 技術棧建議 (Tech Stack)
-* **後端框架**：Python 3.14 + FastAPI
+* **後端框架**：Python 3.10 + FastAPI（受限於部署主機 `fintarck-backend` 鎖定的 3.10.12，見 3.3；`pyproject.toml` 宣告 `requires-python = ">=3.10"`）
 * **協定標準**：Model Context Protocol (MCP) SDK，傳輸方式採 **Streamable HTTP**（單一 `/mcp` 端點，取代原規劃的 SSE transport——實測發現 SSE transport 在 `/mnemosyne/` 路徑前綴的反向代理下會因相對路徑重導向解析錯誤而失敗，詳見 `MCP_Service/CLAUDE.md`），不使用 Stdio。
 * **資料庫**：Firebase/Google Cloud Firestore (Spark 免費方案，含 50k 每日免費讀取、20k 寫入、1 GiB 空間)
 * **向量索引**：Firestore Native Vector Search (支援 HNSW 演算法、餘弦相似度)
@@ -109,8 +109,8 @@ graph TD
 ```
 MCP Client (Cursor / Claude Desktop / 理財網頁)
   └─ https://<proxy-host>/mnemosyne/mcp?key=<MNEMOSYNE_MCP_KEY>　（所有 Client 共用同一條連線字串，domain 不再綁在連線層級，見 2.3）
-       └─ Cloud Run Proxy（Nginx reverse proxy，SSE 長連線 proxy_read_timeout）
-            └─ GCE e2-micro（與 NoCode_Project 的 fintarck-backend **共用同一台主機**，另開一個 port 跑獨立的 systemd service，例如 mnemosyne.service）
+       └─ Cloud Run Proxy（Nginx reverse proxy，Streamable HTTP 長連線 proxy_read_timeout）
+            └─ GCE e2-micro（與 NoCode_Project 的 fintarck-backend **共用同一台主機**，另開一個 port 跑獨立的 systemd service，`mnemosyne.service`）
                  └─ Firestore（**獨立的 GCP 專案**，不與 nocode-finance 共用配額）
 ```
 
@@ -120,7 +120,7 @@ MCP Client (Cursor / Claude Desktop / 理財網頁)
 * **`domain` 改為工具參數，不再透過連線 URL 帶入**：早期設計比照 `?key=<MCP_ACCESS_KEY>` 的模式把 `domain` 也綁進連線 URL，但實測後發現新增 domain 需要逐條連線改設定，摩擦過大（見 2.3 v5 定案）。改為所有 Client 共用同一條連線字串，`domain` 由 AI 在每次工具呼叫時指定，並透過 Domain Registry + `requires_registration` 攔截機制把關（見 2.3、5.1/5.2）。
 * **既有資料遷移**：v5 上線前，須先掃描 Firestore `memories` 集合中所有已出現過的 distinct `domain` 值，批次寫入新增的 `domains` 集合完成 seed，避免舊資料在切換當下被誤判為未註冊而擋下存取（見 2.3 第 6 點）。
 * **`fintarck-proxy` 服務名稱維持不變**：Cloud Run 服務名稱建立後無法修改（GCP 限制），改名須整台搬遷並更新前端呼叫網址，成本不划算。現階段只是命名跟用途不完全一致（純美觀問題），故決定沿用現有名稱，不特別搬遷。
-* **Firestore 存取改用 GCE 附加身分，不用金鑰檔案**：原規劃比照 NoCode_Project 下載服務帳戶 JSON 金鑰（`GOOGLE_APPLICATION_CREDENTIALS_JSON`），但 GCP 組織已啟用 `iam.disableServiceAccountKeyCreation` 政策禁止建立金鑰。改為將 GCE 主機的 Compute Engine 預設服務帳戶（`1077248196503-compute@developer.gserviceaccount.com`）於 `mnemosyne-cb868` 專案 IAM 授予 **Cloud Datastore User** 角色，Firebase Admin SDK 在 GCE 環境下會自動透過 Metadata Server 取得憑證，完全不需要金鑰檔案，安全性優於原規劃（避免金鑰外洩風險），程式端也不需要讀取/設定憑證檔案路徑。
+* **Firestore 存取最終改回金鑰檔案，比照 NoCode_Project（⚠️ 與原規劃相反的決策反轉）**：原規劃是用 GCE 附加身分（Metadata Server 憑證）存取 Firestore，完全不需要金鑰檔案，理由是 GCP 組織啟用了 `iam.disableServiceAccountKeyCreation` 政策禁止建立金鑰。但**實際部署時發現 `google-cloud-firestore` 套件在 GCE 附加身分這條驗證路徑下有相容性問題**（高層級查詢 API 不論走 gRPC 或 REST 傳輸層都會出錯，詳見 `MCP_Service/CLAUDE.md`），與憑證類型本身無關，是套件層級的 bug。改為請 agy 協助在 `mnemosyne-cb868` 專案層級覆寫組織政策、開放金鑰建立，新建專屬服務帳戶 `mnemosyne-db-sa`，下載金鑰檔案 base64 編碼後存進 `GOOGLE_APPLICATION_CREDENTIALS_JSON` 環境變數（`infrastructure/firebase_app.py` 優先讀取此變數，若未設定才退回原本的 GCE 附加身分）。原本「避免金鑰外洩風險」的顧慮改用其他方式緩解：金鑰只存在部署主機的 `.env`（不進版控）、專屬服務帳戶只授予 `roles/datastore.user` 最小權限（不比照原本的 Compute Engine 預設服務帳戶授予更廣的權限範圍）。
 
 ### 3.3.1 Nginx 路徑分流設定
 
@@ -132,13 +132,13 @@ server {
     server_name _;
 
     location /mnemosyne/ {
-        proxy_pass http://35.201.176.69:8001;
+        proxy_pass http://35.201.176.69:8001/;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_read_timeout 86400;
+        proxy_buffering off;
     }
 
     location / {
@@ -152,6 +152,8 @@ server {
     }
 }
 ```
+
+> ⚠️ **與原規劃的差異（實際部署後修正）**：`/mnemosyne/` 這個 block 的 `proxy_pass` 結尾**必須**帶斜線（`http://35.201.176.69:8001/;`），否則 Nginx 不會把 `/mnemosyne/` 這個前綴去掉，後端會收到帶前綴的路徑而 404。也**不可**沿用 `location /` 那種 WebSocket 樣板的 `Upgrade`/`Connection: upgrade` header 組合——MCP 走的是 Streamable HTTP，不是 WebSocket 升級，帶著沒有對應 `Upgrade` header 的 `Connection: upgrade` 會被 Cloud Run 前端判定為畸形請求直接拒絕（`421`）；改用 `proxy_set_header Connection ""` 清空即可，另外加 `proxy_buffering off` 確保串流即時送出。詳見 `MCP_Service/CLAUDE.md`「Deployment gotchas」。
 
 **對應的 GCE 端調整**：
 * 新增 `mnemosyne.service`（systemd），監聽 `:8001`，跑法比照既有 `fastapi.service`（`uvicorn main:app --port 8001`）。
@@ -219,7 +221,7 @@ Mnemosyne MCP Server 將對外暴露**八個**核心工具 (Tools) 供 AI Agent 
 
 ### 5.0 Tool Description 撰寫原則
 
-MCP Tool 的 `description` 字串會被直接注入 AI 的 context，直接影響 AI「該不該呼叫」「呼叫哪個」的判斷品質，因此撰寫時遵循以下設計原則（各工具收斂後的實際文字定案於 `MCP_Service/Task.md` 2.1 節，此處只記錄原則本身，避免規格文字分散兩處造成不同步）：
+MCP Tool 的 `description` 字串會被直接注入 AI 的 context，直接影響 AI「該不該呼叫」「呼叫哪個」的判斷品質，因此撰寫時遵循以下設計原則（各工具收斂後的實際文字定案於 `interface/mcp_server.py` 各工具的 `@mcp_server.tool(description=...)` 裝飾器內，此處只記錄原則本身，避免規格文字分散兩處造成不同步）：
 
 1. **開頭寫觸發情境，不是功能敘述**：LLM 決定是否呼叫工具主要看「情境符不符合」，不是「工具做什麼」，第一句話應是「當...時使用」。
 2. **`domain` 參數的 description 要引導 AI 先查再填，而非憑空生成**：`domain` 已是自由參數（見 5 章開頭），description 應提示 AI 參考動態注入的既有 domain 清單（見 2.3 第 3 點）選用；填入未註冊的值會被拒絕並收到 `requires_registration`，這件事也要在 description 講清楚，讓 AI 不會誤以為隨便填字串都會成功。
@@ -376,8 +378,8 @@ score = w1 · relevance(向量相似度)
 
 ## 8. 專案開發里程碑 (Roadmap)
 
-* [ ] **Phase 1: 基礎建設**（GCP/Firestore、Python 專案骨架、Embedding/LLM 串接、`config.py` 參數）
-* [ ] **Phase 2: MCP Server 開發與部署**（八個工具、Domain Registry + `requires_registration` 攔截、寫入閘門雙軌候選與衝突偵測、GCE/Nginx/Cloud Run 部署、既有資料 domain 遷移、整合測試）
+* [x] **Phase 1: 基礎建設**（GCP/Firestore、Python 專案骨架、Embedding/LLM 串接、`config.py` 參數）
+* [x] **Phase 2: MCP Server 開發與部署**（八個工具、Domain Registry + `requires_registration` 攔截、寫入閘門雙軌候選與衝突偵測、GCE/Nginx/Cloud Run 部署、既有資料 domain 遷移、整合測試、CI/CD 自動化）——已透過 Claude Desktop 實際連線驗證全部工具與寫入閘門五種決定值，部署過程中的踩坑細節見 `MCP_Service/CLAUDE.md`
 * [ ] **Phase 3: 記憶自動精煉**（設計 Agent prompt 範本，引導 AI 判斷「值得存」的時機並精煉成因果結構；原「經驗學習迴路」已因 `reflect_on_task` 併入 `save_memory`（2.5、6.2）而不再是獨立階段性任務）
 * [ ] **Phase 4: 記憶治理與跨專案優化**：實作定期固化排程（6.3）與衰減排序公式調校（6.1）；理財專案前端「記憶庫管理」Dashboard；擴展到其他個人專案
 

@@ -5,9 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project
 
 Mnemosyne MCP Server — a Python/FastAPI-based MCP (Model Context Protocol) server that gives AI assistants
-a long-term memory layer backed by Google Cloud Firestore (vector search) and Vertex AI (embeddings +
-Gemini Flash for write-time judgment). It exposes 8 MCP tools (`save_memory`, `search_memories`,
-`forget_memory`, `pin_memory`, `unpin_memory`, `load_pinned_memories`, `list_domains`, `register_domain`).
+a long-term memory layer backed by Google Cloud Firestore (vector search) and Gemini (embeddings +
+write-time judgment, via a personal Google AI Studio subscription — see "Gemini API" section below for why
+this isn't plain Vertex AI). It exposes 8 MCP tools (`save_memory`, `search_memories`, `forget_memory`,
+`pin_memory`, `unpin_memory`, `load_pinned_memories`, `list_domains`, `register_domain`).
 
 The authoritative design spec is `../Docs/Mnemosyne_MCP_Proposal.md` (one level up, outside this directory).
 It is actively maintained as part of a broader project and should be treated as read-only reference from
@@ -33,13 +34,25 @@ There is no build step; this is a plain Python package.
 .venv/Scripts/python.exe -m scripts.seed_domain_registry
 ```
 
-Required environment variables (see `config.py`): `MNEMOSYNE_MCP_KEY` (no default — the key-auth
-middleware fails closed if unset), `MNEMOSYNE_GOOGLE_CLOUD_PROJECT_ID` (default `mnemosyne-cb868`),
-`MNEMOSYNE_GOOGLE_CLOUD_LOCATION` (default `asia-east1`). Note `python-dotenv` is a declared dependency
-but nothing in the code calls `load_dotenv()` — env vars must actually be exported in the shell (or
-supplied via the systemd `.env` unit on the deploy host), not just placed in a `.env` file locally.
-Firestore/Vertex AI access uses Application Default Credentials (no key files) — run
-`gcloud auth application-default login` for local dev against the real project.
+Environment variables (see `config.py` / `interface/mcp_server.py` / `infrastructure/firebase_app.py`):
+- `MNEMOSYNE_MCP_KEY` — required, no default; the key-auth middleware fails closed if unset.
+- `GEMINI_API_KEY` — personal Google AI Studio key; when set, both the embedding provider and the
+  write-gate classifier use it instead of Vertex AI (see "Gemini API" section below — this is the actual
+  production configuration, not a fallback).
+- `GOOGLE_APPLICATION_CREDENTIALS_JSON` — base64-encoded service account key JSON (falls back to raw
+  JSON if base64 decoding fails), used by `firebase_app.py` for Firestore access. Takes priority over GCE
+  attached identity when present (see "Deployment gotchas" — GCE attached identity has a library
+  compatibility bug with Firestore's query API, so this is also the actual production configuration).
+- `MNEMOSYNE_GOOGLE_CLOUD_PROJECT_ID` (default `mnemosyne-cb868`), `MNEMOSYNE_GOOGLE_CLOUD_LOCATION`
+  (default `asia-east1`, used for Firestore/embedding), `MNEMOSYNE_GEMINI_CLASSIFIER_LOCATION` (default
+  `us-central1`, Vertex-mode only — Gemini models aren't available in every Vertex region).
+- `MNEMOSYNE_DISABLE_DNS_REBINDING_PROTECTION` / `MNEMOSYNE_ALLOWED_HOSTS` — see "Deployment gotchas."
+
+Note `python-dotenv` is a declared dependency but nothing in the code calls `load_dotenv()` — env vars must
+actually be exported in the shell (or supplied via the systemd `.env` unit on the deploy host), not just
+placed in a `.env` file locally. For local dev without a service account key, `gcloud auth
+application-default login` sets up ADC as a fallback, but expect the Firestore query issue described in
+"Deployment gotchas" unless a key file is used.
 
 **No test suite exists in this repo yet.** Verification during development has been done ad hoc: a quick
 `ast.parse` sweep over all `.py` files to catch syntax errors, then throwaway scripts (deleted after use,
@@ -50,13 +63,37 @@ rather than mocking framework internals.
 
 ## Architecture
 
-**Hexagonal Architecture (Ports & Adapters).** Three hard rules, enforced by convention (no linter checks
-this):
+**Hexagonal Architecture (Ports & Adapters).** Chosen because the tech stack (Python + FastAPI) was picked
+for deployment-parity with `NoCode_Project`/`fintarck-backend` (shared GCE host, same deploy pattern), not
+because Python has an edge in the MCP ecosystem — this layering keeps the option open to rewrite just the
+outer layers in another language/runtime later without touching the business logic. Three hard rules,
+enforced by convention (no linter checks this):
 1. `domain/` must not import any third-party framework/SDK (no FastAPI, Pydantic, firebase-admin,
    google-genai) — standard library only. It's meant to be portable to another language/runtime later.
 2. Ports (`domain/ports/*.py`) are `typing.Protocol` definitions, not ABCs.
 3. `interface/` (the MCP tool handlers in `mcp_server.py`) only does "parse input → call use case →
    format output" — no business logic there.
+
+```
+MCP_Service/
+├── domain/                     # zero framework deps, portable to another language later
+│   ├── models.py                # Memory etc. — immutable value objects (frozen dataclass)
+│   ├── scoring.py                # decay-ranking formula (Proposal 6.1) — pure function
+│   ├── write_gate_policy.py      # write-gate decision rules (Proposal 5.1) — pure function + thresholds
+│   └── ports/                    # abstract interfaces (typing.Protocol)
+│       ├── memory_repository.py
+│       ├── embedding_provider.py
+│       └── gate_classifier.py
+├── application/                # use-case orchestration layer, injects ports, still framework-free
+├── infrastructure/              # concrete adapters, tied to Python/GCP — a future migration only rewrites this layer
+│   ├── firestore_memory_repository.py
+│   ├── vertex_embedding_provider.py
+│   └── gemini_gate_classifier.py
+└── interface/                   # MCP/FastAPI entry point, I/O translation only
+    ├── mcp_server.py             # tool registration, Streamable HTTP transport, dynamic domain description injection
+    ├── key_auth_middleware.py    # MNEMOSYNE_MCP_KEY check
+    └── tool_schemas.py           # the only layer where Pydantic models live
+```
 
 Layers: `domain/` (pure logic + Protocol ports) → `application/` (use cases, orchestrate ports, still
 framework-free) → `infrastructure/` (Firestore/Vertex AI/Gemini adapters implementing the ports) →
