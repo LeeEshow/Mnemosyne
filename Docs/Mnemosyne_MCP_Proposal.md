@@ -99,6 +99,8 @@ graph TD
 * **向量索引**：Firestore Native Vector Search (支援 HNSW 演算法、餘弦相似度)
 * **Embedding 模型**：**Google `text-multilingual-embedding-002` (768維)**（定案）。理由：與 Firestore/GCE 同屬 GCP 生態系，可共用同一組服務帳號憑證；768 維比 OpenAI `text-embedding-3-small` 的 1536 維更省儲存與運算成本；對繁體中文的語意理解足夠且經過 multilingual 優化。
 * **寫入閘門判定 LLM**：**Gemini Flash 系列**（定案）。理由：NOOP/UPDATE/SUPERSEDE/ADD 四選一分類任務不需要強推理能力，Gemini Flash 速度快、成本低，且同屬 GCP 生態系可共用憑證，不需額外引入 Anthropic/OpenAI API Key 造成跨雲依賴。若日後實測判斷品質不穩定，可再替換，抽換成本低。
+
+> ⚠️ **待辦（部署階段發現）**：Vertex AI（embedding + Gemini Flash 判定）與 Firestore Spark 方案不同，**即使用量落在免費額度內，專案本身仍必須掛上有效計費帳戶才能呼叫**，否則一律 `403 PERMISSION_DENIED (BILLING_DISABLED)`。目前 `mnemosyne-cb868` 已掛上帳單帳戶讓服務能運作，但這代表 Mnemosyne 已不是純粹的免費架構。待日後有空時評估是否有不需計費帳戶的替代方案（例如改用其他免費額度充足的 embedding/LLM API、或評估 Vertex AI 免費試用額度的實際覆蓋範圍是否足夠長期個人使用），目前先以「可運作」為優先，成本優化留待之後。
 * **設定管理**：寫入閘門的相似度分段門檻（見 5.1）與衰減排序參數（見 6.1）屬於**模型相依參數**（不同 Embedding 模型的餘弦相似度分佈不同），統一集中於 `config.py`，不寫死在程式邏輯中。起始值見 6.1 與 5.1。
 
 ### 3.3 部署架構 (Deployment)
