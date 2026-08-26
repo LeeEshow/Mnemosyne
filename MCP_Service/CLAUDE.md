@@ -201,6 +201,12 @@ the "unset `GEMINI_API_KEY`" path to actually work without also reverting the in
 `gcloud firestore indexes composite create` with `dimension: "768"`) or finding a Vertex model/config that
 supports matching output dimensionality.
 
+**`config.GATE_CLASSIFIER_MODEL` is also split the same way**: `gemini-2.5-flash` returns
+`404 "This model ... is no longer available to new users"` on the Google AI Studio Developer API (that
+model was retired from new-account access there; Vertex AI's enterprise lifecycle is separate and still
+serves it), so the API-key branch uses `gemini-3.6-flash` instead. If a similar model-retirement error shows
+up again, check `client.models.list()` for what's actually still servable before assuming it's a code bug.
+
 Switching `GEMINI_API_KEY` on/off, or changing which embedding model is active, invalidates every stored
 `embedding` field — old vectors were computed by a different model/dimensionality and aren't comparable to
 new queries. There is no in-place migration for this; the fix is wiping and re-adding memories after a

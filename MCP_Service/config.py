@@ -14,7 +14,10 @@ GEMINI_CLASSIFIER_LOCATION = os.environ.get("MNEMOSYNE_GEMINI_CLASSIFIER_LOCATIO
 # 另外調整索引或改用支援指定輸出維度的 Vertex 模型，見 CLAUDE.md。
 EMBEDDING_MODEL = "gemini-embedding-001" if os.environ.get("GEMINI_API_KEY") else "text-multilingual-embedding-002"
 EMBEDDING_DIMENSION = 1536
-GATE_CLASSIFIER_MODEL = "gemini-2.5-flash"
+# gemini-2.5-flash 已從 Google AI Studio（Developer API）的新帳號可用清單下架
+# （404 "no longer available to new users"），Vertex AI 企業版生命週期是分開的，
+# 目前仍可用，所以比照 EMBEDDING_MODEL 依 GEMINI_API_KEY 連動切換。
+GATE_CLASSIFIER_MODEL = "gemini-3.6-flash" if os.environ.get("GEMINI_API_KEY") else "gemini-2.5-flash"
 
 FIRESTORE_ARRAY_CONTAINS_ANY_LIMIT = 10
 
