@@ -45,7 +45,7 @@
 3. **動態 Tool Description 注入（輔助，非防線）**：MCP Server 回應 `list_tools` 時即時查詢 `domains` 集合，把已註冊的 domain 名稱與描述拼進 `domain` 參數的 description，輔助 AI 判斷該填哪個既有值。這只是 UX 輔助——不同 MCP Client 對 `list_tools` 的重新拉取時機不一致，中途新增的 domain 未必即時反映在當次對話的 context 裡，**真正的強制力落在 `requires_registration` 的 Server 端攔截與拒絕上**，不能只靠描述注入把關。
 4. **名稱正規化**：`domain` 值一律 `strip().lower()` 正規化後再比對/寫入，避免 `"Cooking"` 與 `"cooking"` 被視為不同 domain 而重複註冊。
 5. **抑制分類漂移**：`register_domain` 的 description 明訂 AI 呼叫前必須先參考已注入的既有 domain 清單，確認沒有語意高度重疊的既有分類，優先建議使用者沿用既有 domain，而非隨手建立新的。
-6. **既有資料遷移（部署前置步驟，見 3.3）**：上線前必須先掃描既有 `memories` 集合中出現過的所有 distinct domain 值，批次寫入 `domains` 完成 seed，否則舊資料會在切換當下被誤判為「未註冊」而全面擋下存取。**`"global"` 這個特殊值必須一併明確 seed**（例如 `describe: "全域通用偏好與設定，檢索時會自動與指定領域合併，請勿在此寫入特定技術或專案知識。"`），不能假設它會被既有資料掃描自動涵蓋到——若舊資料庫裡從未真的寫過 `domain="global"` 的記憶，掃描結果就不會包含它，導致 Step 0 驗證誤判 `"global"` 未註冊。
+6. **既有資料遷移（部署前置步驟，見 3.3）**：上線前必須先掃描既有 `memories` 集合中出現過的所有 distinct domain 值，批次寫入 `domains` 完成 seed，否則舊資料會在切換當下被誤判為「未註冊」而全面擋下存取。**`"global"` 這個特殊值必須一併明確 seed**（例如 `description: "全域通用偏好與設定，檢索時會自動與指定領域合併，請勿在此寫入特定技術或專案知識。"`），不能假設它會被既有資料掃描自動涵蓋到——若舊資料庫裡從未真的寫過 `domain="global"` 的記憶，掃描結果就不會包含它，導致 Step 0 驗證誤判 `"global"` 未註冊。
 
 ### 2.5 因果記憶模型 (Causal Memory Model)
 記憶不是孤立的事實清單，而是有「因為什麼、所以得到什麼結論」的因果關係——上一個結論也可能成為下一次判斷的因，反覆修正、疊代形成價值觀。這個人類認知仿生的觀察，直接影響第 4 章的 Schema 設計：
@@ -192,7 +192,7 @@ server {
 | 欄位名稱 | 資料型別 | 必填 | 說明 |
 | :--- | :--- | :---: | :--- |
 | `name` | `String` | 🟢 | Domain 名稱，唯一值，寫入/比對前一律 `strip().lower()` 正規化。 |
-| `describe` | `String` | 🟢 | 該領域的定位與語意邊界描述，供動態注入 `list_tools` 回應（見 2.3 第 3 點）與 AI 判斷選用依據。 |
+| `description` | `String` | 🟢 | 該領域的定位與語意邊界描述，供動態注入 `list_tools` 回應（見 2.3 第 3 點）與 AI 判斷選用依據。 |
 | `created_at` | `Timestamp` | 🟢 | 建立時間。 |
 
 新增（`register_domain`，見 5.6）需人工確認；查詢/選用（`list_domains`，見 5.7）無限制。實際的攔截流程（`requires_registration`）見 5.1/5.2。
@@ -300,14 +300,14 @@ MCP Tool 的 `description` 字串會被直接注入 AI 的 context，直接影�
 > **功能**：查詢 Domain Registry 目前已註冊的所有 domain 及其定位描述。主要供人工檢視/管理使用；AI 判斷該填哪個既有 domain 的依據以動態注入的 `list_tools` 描述（見 2.3 第 3 點）為主，不強制每次呼叫前都先呼叫此工具。
 
 * **輸入參數**：無。
-* **後台邏輯**：讀取 `domains` 集合全部文件，回傳 `name`/`describe`/`created_at` 列表。
+* **後台邏輯**：讀取 `domains` 集合全部文件，回傳 `name`/`description`/`created_at` 列表。
 
 ### 5.7 `register_domain`
 > **功能**：註冊一個新的 domain。**僅在使用者於對話中明確同意後才可呼叫**，不可由 AI 自行判斷觸發（見 2.3、5.1/5.2 的 `requires_registration` 攔截流程）。
 
 * **輸入參數**：
   * `name` (string, required): 新 domain 名稱，寫入前正規化（`strip().lower()`）並檢查唯一性，重複則回傳既有註冊資訊、不重複建立。
-  * `describe` (string, required): 該領域的定位與語意邊界描述。
+  * `description` (string, required): 該領域的定位與語意邊界描述。
 * **後台邏輯**：
   1. **前置引導（寫在 description，非程式強制）**：呼叫前必須先參考已注入的既有 domain 清單，確認沒有語意高度重疊的既有分類；若有，應建議使用者沿用既有 domain 而非新建，降低分類漂移風險（見 2.3 第 5 點）。
   2. 正規化後寫入 `domains` 集合。
