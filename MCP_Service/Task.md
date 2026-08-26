@@ -118,7 +118,11 @@ MCP_Service/
 >
 > ⚠️ **發現問題並已修正**：`CONFLICT_DETECTED` 分支第一輪實測**沒有觸發成功**——餵入邏輯矛盾案例（先前記錄「愛吃牛肉麵」，後餵入「宗教因素完全禁食牛肉」，標籤刻意重疊以確保進入候選名單）時，LLM 判成 `SUPERSEDE`（自動覆蓋，附重新摘要說明推翻原因）而非 `CONFLICT_DETECTED`（暫停詢問使用者）。程式碼邏輯本身正確執行了 SUPERSEDE 分支，問題出在 prompt 對「單方說法更新」與「需要人工確認的矛盾」邊界判斷偏向前者，且 `SUPERSEDE` 範例清單（電話/地址/版本號）沒有明確排除「人員/職務歸屬」「偏好/能力/允許狀態」這類高風險欄位。
 >
-> **已與 agy 討論定案並修改 `gemini_gate_classifier.py` 的 prompt**：`SUPERSEDE` 收斂為僅限「純技術/聯絡類中繼資料的無爭議更迭」（電話、地址、Email、軟體版本號、序號）；只要涉及人員/職務/責任歸屬，或使用者的偏好、能力、允許狀態被否定/推翻，一律歸類 `CONFLICT_DETECTED`，不因表面上「像是單一值被取代」就自動放行。**尚待重新部署後用實際案例（含 agy 提供的 4 組對照測試）重新驗證行為符合預期**，見下方部署清單。
+> **已與 agy 討論定案並修改 `gemini_gate_classifier.py` 的 prompt**：`SUPERSEDE` 收斂為僅限「純技術/聯絡類中繼資料的無爭議更迭」（電話、地址、Email、軟體版本號、序號）；只要涉及人員/職務/責任歸屬，或使用者的偏好、能力、允許狀態被否定/推翻，一律歸類 `CONFLICT_DETECTED`，不因表面上「像是單一值被取代」就自動放行。
+>
+> **重新部署後用 agy 提供的 4 組對照測試實測，全部符合預期**：① 飲食偏好劇烈改變（愛吃牛肉麵→宗教禁食牛肉）→ `CONFLICT_DETECTED` ✅；② 客觀資訊更迭（電話號碼變更）→ `SUPERSEDE` ✅；③ 細節增補（牛肉麵偏好麵條種類）→ `UPDATE` ✅；④ 人員/職務歸屬變更（PM 從 Alice 換成 Bob）→ `CONFLICT_DETECTED` ✅（agy 原提案這組跟電話號碼案例的判準不一致，已在 prompt 明確排除人員歸屬類別後解決，見上方 PM 判斷紀錄）。此問題已完全解決。
+>
+> **同一輪測試/部署過程中額外發現並修正的問題**：改用個人 Google AI Studio 訂閱的 `GEMINI_API_KEY` 後，`text-embedding-004` 這個模型名稱在 Developer API 不存在（改用 `gemini-embedding-001`，但原生 3072 維超過 Firestore 向量索引 2048 維上限，改用 Matryoshka 截斷至 1536 維，Firestore 複合向量索引已重建）；`gemini-2.5-flash` 對 Google AI Studio 新帳號已下架（改用 `gemini-3.6-flash`）。兩者皆已比照 `GEMINI_API_KEY` 是否設定的模式做條件切換，Vertex AI 退路因索引維度變更暫不可用，詳見 `CLAUDE.md`。
 
 ### 2.6 CI/CD 自動化（延後，不影響上線）
 - [ ] 比照 NoCode_Project `deploy-python-backend.yml` 新增 `deploy-mnemosyne.yml`：偵測 `MCP_Service/**` 變更 → SSH 進 GCE → `git pull` → 安裝依賴 → `systemctl restart mnemosyne`
