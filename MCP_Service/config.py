@@ -6,7 +6,10 @@ GOOGLE_CLOUD_LOCATION = os.environ.get("MNEMOSYNE_GOOGLE_CLOUD_LOCATION", "asia-
 # 獨立設定避免受限於 Firestore/embedding 共用的 GOOGLE_CLOUD_LOCATION。
 GEMINI_CLASSIFIER_LOCATION = os.environ.get("MNEMOSYNE_GEMINI_CLASSIFIER_LOCATION", "us-central1")
 
-EMBEDDING_MODEL = "text-multilingual-embedding-002"
+# 模型名稱依是否設定 GEMINI_API_KEY 連動：走個人 Google AI Studio 訂閱時，
+# 用該平台的向量模型（跟 Vertex AI 的 text-multilingual-embedding-002 向量空間不相容，
+# 兩者不可混用；切換模型代表既有記憶的 embedding 全部要重新計算，見 CLAUDE.md）。
+EMBEDDING_MODEL = "text-embedding-004" if os.environ.get("GEMINI_API_KEY") else "text-multilingual-embedding-002"
 GATE_CLASSIFIER_MODEL = "gemini-2.5-flash"
 
 FIRESTORE_ARRAY_CONTAINS_ANY_LIMIT = 10

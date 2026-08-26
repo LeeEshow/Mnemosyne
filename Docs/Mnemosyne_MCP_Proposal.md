@@ -94,13 +94,13 @@ graph TD
 
 ### 3.2 技術棧建議 (Tech Stack)
 * **後端框架**：Python 3.14 + FastAPI
-* **協定標準**：Model Context Protocol (MCP) SDK，傳輸方式採 **SSE over HTTP**（沿用既有專案 NoCode_Project 已驗證可行的部署模式，見 3.3），不使用 Stdio。
+* **協定標準**：Model Context Protocol (MCP) SDK，傳輸方式採 **Streamable HTTP**（單一 `/mcp` 端點，取代原規劃的 SSE transport——實測發現 SSE transport 在 `/mnemosyne/` 路徑前綴的反向代理下會因相對路徑重導向解析錯誤而失敗，詳見 `MCP_Service/CLAUDE.md`），不使用 Stdio。
 * **資料庫**：Firebase/Google Cloud Firestore (Spark 免費方案，含 50k 每日免費讀取、20k 寫入、1 GiB 空間)
 * **向量索引**：Firestore Native Vector Search (支援 HNSW 演算法、餘弦相似度)
-* **Embedding 模型**：**Google `text-multilingual-embedding-002` (768維)**（定案）。理由：與 Firestore/GCE 同屬 GCP 生態系，可共用同一組服務帳號憑證；768 維比 OpenAI `text-embedding-3-small` 的 1536 維更省儲存與運算成本；對繁體中文的語意理解足夠且經過 multilingual 優化。
-* **寫入閘門判定 LLM**：**Gemini Flash 系列**（定案）。理由：NOOP/UPDATE/SUPERSEDE/ADD 四選一分類任務不需要強推理能力，Gemini Flash 速度快、成本低，且同屬 GCP 生態系可共用憑證，不需額外引入 Anthropic/OpenAI API Key 造成跨雲依賴。若日後實測判斷品質不穩定，可再替換，抽換成本低。
+* **Embedding 模型**：**Google `text-multilingual-embedding-002` (768維，Vertex AI) / `text-embedding-004`（個人 Google AI Studio 訂閱）二擇一（定案，依環境變數 `GEMINI_API_KEY` 是否設定切換，見下方待辦與 `MCP_Service/CLAUDE.md`）**。理由：與 Firestore/GCE 同屬 GCP 生態系可共用憑證；對繁體中文的語意理解足夠且經過 multilingual 優化。⚠️ 兩個模型的向量空間不相容，切換後既有記憶的 `embedding` 全部失效，需清空重新寫入。
+* **寫入閘門判定 LLM**：**Gemini Flash 系列**（定案，同樣依 `GEMINI_API_KEY` 在 Vertex AI / 個人 Google AI Studio 訂閱間切換）。理由：NOOP/UPDATE/SUPERSEDE/CONFLICT_DETECTED/ADD 五選一分類任務不需要強推理能力，Gemini Flash 速度快、成本低，且同屬 GCP 生態系可共用憑證，不需額外引入 Anthropic/OpenAI API Key 造成跨雲依賴。若日後實測判斷品質不穩定，可再替換，抽換成本低。
 
-> ⚠️ **待辦（部署階段發現）**：Vertex AI（embedding + Gemini Flash 判定）與 Firestore Spark 方案不同，**即使用量落在免費額度內，專案本身仍必須掛上有效計費帳戶才能呼叫**，否則一律 `403 PERMISSION_DENIED (BILLING_DISABLED)`。目前 `mnemosyne-cb868` 已掛上帳單帳戶讓服務能運作，但這代表 Mnemosyne 已不是純粹的免費架構。待日後有空時評估是否有不需計費帳戶的替代方案（例如改用其他免費額度充足的 embedding/LLM API、或評估 Vertex AI 免費試用額度的實際覆蓋範圍是否足夠長期個人使用），目前先以「可運作」為優先，成本優化留待之後。
+> ⚠️ **待辦（部署階段發現，已部分解決）**：Vertex AI（embedding + Gemini Flash 判定）與 Firestore Spark 方案不同，即使用量落在免費額度內，專案本身仍必須掛上有效計費帳戶才能呼叫，否則一律 `403 PERMISSION_DENIED (BILLING_DISABLED)`。已改為優先使用個人 Google AI Studio 訂閱的 `GEMINI_API_KEY`（走個人訂閱額度，不再計入 GCP 帳單），`mnemosyne-cb868` 目前仍掛著帳單帳戶作為 `GEMINI_API_KEY` 未設定時的退路，之後可視情況評估是否要移除。
 * **設定管理**：寫入閘門的相似度分段門檻（見 5.1）與衰減排序參數（見 6.1）屬於**模型相依參數**（不同 Embedding 模型的餘弦相似度分佈不同），統一集中於 `config.py`，不寫死在程式邏輯中。起始值見 6.1 與 5.1。
 
 ### 3.3 部署架構 (Deployment)

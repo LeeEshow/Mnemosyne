@@ -1,4 +1,5 @@
 import json
+import os
 
 from google import genai
 from google.genai import types
@@ -7,12 +8,19 @@ import config
 from domain.models import Memory
 from domain.write_gate_policy import GateVerdict, WriteGateDecision
 
-_PROMPT_TEMPLATE = """你是記憶庫寫入判定助手，請比較「新記憶」與下列「候選記憶清單」，判斷應採取下列何種動作：
-NOOP：新記憶與清單中某一筆候選記憶語意完全相同，不需寫入
-UPDATE：新記憶是清單中某一筆候選記憶的補充或修正，應合併兩者內容覆寫該候選記憶（高相似度不代表語意重複，可能只是舊記憶的超集合，這種情況必須合併而非直接 NOOP，否則會遺失新增資訊）
-SUPERSEDE：新記憶推翻清單中某一筆候選記憶（該候選記憶已過時或錯誤）
-CONFLICT_DETECTED：新記憶與清單中某一筆候選記憶存在邏輯矛盾（而非單純的延伸或無關）
-ADD：新記憶與清單中所有候選記憶語意皆不同，應新增為獨立記錄
+_PROMPT_TEMPLATE = """你是記憶庫寫入判定助手，請比較「新記憶」與「候選記憶清單」，選擇動作：
+1. NOOP：語意完全相同。
+2. UPDATE（相容增補）：新舊資訊邏輯不衝突，可合併並存。
+   - 範例：舊「偏好 Python」+ 新「網頁開發偏好用 Go」→ 合併。
+   - 範例：舊「愛吃牛肉麵」+ 新「吃麵偏好粗麵」→ 合併。
+3. SUPERSEDE（純技術/聯絡類中繼資料的無爭議更迭）：僅限電話、地址、Email、軟體版本號、序號這類**低風險、沒有解讀空間的欄位**被新值取代。
+   - 範例：舊「電話是 A」+ 新「電話改為 B」→ SUPERSEDE。
+   - ⚠️凡是涉及「人員/職務/責任歸屬」、「使用者的偏好、能力、允許狀態」的變更，即使表面上也是「單一值被新值取代」，一律不可判為 SUPERSEDE，必須判為 CONFLICT_DETECTED——這兩種欄位一旦誤判自動覆蓋，風險遠高於聯絡資訊打錯字。
+4. CONFLICT_DETECTED（邏輯矛盾/偏好或人員歸屬對立）：新記憶否定、禁止或推翻了舊記憶陳述的偏好、能力、允許狀態，或人員/職務/責任歸屬。
+   - 範例：舊「偏好線上會議」+ 新「討厭線上會議」→ CONFLICT_DETECTED。
+   - 範例：舊「這個專案的 PM 是 Alice」+ 新「Bob 已接任成為新 PM」→ CONFLICT_DETECTED（人員歸屬變更，不可視同聯絡資訊更新）。
+   - 範例：舊「愛吃牛肉麵」+ 新「宗教因素完全禁食牛肉」→ CONFLICT_DETECTED（即使新記憶本身講得像是在「更新」舊資訊，只要否定了先前的偏好/能力陳述，就不可自動覆蓋）。
+5. ADD：與所有候選記憶語意皆不同且無關，應新增為獨立記錄。
 
 新記憶標題：{new_title}
 新記憶因（premise）：{new_premise}
@@ -39,11 +47,16 @@ _RESPONSE_SCHEMA = {
 
 class GeminiGateClassifier:
     def __init__(self) -> None:
-        self._client = genai.Client(
-            vertexai=True,
-            project=config.GOOGLE_CLOUD_PROJECT_ID,
-            location=config.GEMINI_CLASSIFIER_LOCATION,
-        )
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if api_key:
+            # 個人 Google AI Studio API Key，走計量計費以外的個人訂閱額度。
+            self._client = genai.Client(api_key=api_key)
+        else:
+            self._client = genai.Client(
+                vertexai=True,
+                project=config.GOOGLE_CLOUD_PROJECT_ID,
+                location=config.GEMINI_CLASSIFIER_LOCATION,
+            )
 
     async def classify(self, new_memory: Memory, candidates: tuple[Memory, ...]) -> GateVerdict:
         prompt = self._build_prompt(new_memory, candidates)

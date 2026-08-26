@@ -110,7 +110,15 @@ MCP_Service/
 
 > 首次真實部署疊了五個環境/函式庫層級的問題（跟程式碼邏輯無關），逐一排查後全部解決：`google-api-core==2.35.0` regression 導致 Firestore 查詢全面 400（鎖版 2.34.0）、GCE VM access scope 與 IAM 角色是獨立限制（補上 `cloud-platform` scope）、跨專案需明確指定 `firebase_admin` 的 `projectId`（見 2.2 節）、MCP SDK `sse_app` 預設 DNS Rebinding 防護擋掉 Cloud Run 代理轉發的請求（新增 `MNEMOSYNE_DISABLE_DNS_REBINDING_PROTECTION`/`MNEMOSYNE_ALLOWED_HOSTS` 環境變數）、`fintarck-proxy` 的 `nginx.conf` 缺少 `/mnemosyne/` 分流且 `proxy_pass` 需補斜線去除路徑前綴。排查細節與各問題的診斷方式記錄於 `CLAUDE.md`「Deployment gotchas」章節，不重複寫在這裡。連線驗證：`curl .../mnemosyne/sse?key=<KEY>` 已確認回 `200`。
 
-- [ ] 整合測試：跨 domain 隔離、`save_memory` 未註冊 domain 回傳 `requires_registration`、`search_memories`/`load_pinned_memories` 未註冊 domain 觸發 `DomainNotRegisteredError`（確認 MCP Client 收到 `isError=True`）、`register_domain` 人工確認流程、正規化去重（大小寫/空白）、寫入閘門三種結果（重複/全新/衝突）、`CONFLICT_DETECTED` 觸發後 AI 是否確實暫停詢問使用者、標籤交集能否抓到低相似度但主題相關的衝突案例（例如：喜好類陳述的修正）、既有資料遷移後可正常存取（含 `"global"` seed 是否生效）、`list_tools` 快取是否確實降低 Firestore 讀取次數
+- [x] 整合測試：跨 domain 隔離、`save_memory` 未註冊 domain 回傳 `requires_registration`、`search_memories`/`load_pinned_memories` 未註冊 domain 觸發 `DomainNotRegisteredError`（確認 MCP Client 收到 `isError=True`）、`register_domain` 人工確認流程、正規化去重（大小寫/空白）、寫入閘門三種結果（重複/全新/衝突）、`CONFLICT_DETECTED` 觸發後 AI 是否確實暫停詢問使用者、標籤交集能否抓到低相似度但主題相關的衝突案例（例如：喜好類陳述的修正）、既有資料遷移後可正常存取（含 `"global"` seed 是否生效）、`list_tools` 快取是否確實降低 Firestore 讀取次數
+
+> **實測過程額外發現並修正的問題**（連線層/基礎設施，非邏輯 bug）：① `mcp.server` 的舊版 `sse_app()` 在 `/mnemosyne/` 路徑前綴代理下會壞（相對路徑重導向解析錯誤，導致 Claude Desktop 誤判為需要登入），改用 `streamable_http_app()`（單一 `/mcp` 端點）解決；② `mnemosyne-cb868` 專案初期未掛計費帳戶，Vertex AI 呼叫一律 403 BILLING_DISABLED（Firestore Spark 方案不需要，但 Vertex AI 需要），已掛上帳單帳戶，Proposal 3.2 節已記錄待評估免計費替代方案；③ `gemini-2.5-flash` 在 `asia-east1` 無法使用（Gemini 系列模型可用區域比 embedding 窄很多），新增獨立的 `MNEMOSYNE_GEMINI_CLASSIFIER_LOCATION`（預設 `us-central1`），embedding 維持 `asia-east1` 不受影響。
+>
+> **透過 Claude Desktop 實際串接 MCP Client 跑完全部整合測試項目，結果**：跨 domain 隔離 ✅、未註冊 domain 兩種攔截形狀（`requires_registration`/拋例外）✅、`register_domain` 正規化去重（冪等、不覆蓋既有描述）✅、寫入閘門 ADD/NOOP/UPDATE ✅（UPDATE 合併品質佳，是真正重新摘要而非串接）、pin/unpin/load_pinned_memories ✅、`exact_tags` 精確命中（語意完全無關的查詢也能靠標籤命中）✅、`list_tools` 動態注入已註冊 domain 清單 ✅。
+>
+> ⚠️ **發現問題並已修正**：`CONFLICT_DETECTED` 分支第一輪實測**沒有觸發成功**——餵入邏輯矛盾案例（先前記錄「愛吃牛肉麵」，後餵入「宗教因素完全禁食牛肉」，標籤刻意重疊以確保進入候選名單）時，LLM 判成 `SUPERSEDE`（自動覆蓋，附重新摘要說明推翻原因）而非 `CONFLICT_DETECTED`（暫停詢問使用者）。程式碼邏輯本身正確執行了 SUPERSEDE 分支，問題出在 prompt 對「單方說法更新」與「需要人工確認的矛盾」邊界判斷偏向前者，且 `SUPERSEDE` 範例清單（電話/地址/版本號）沒有明確排除「人員/職務歸屬」「偏好/能力/允許狀態」這類高風險欄位。
+>
+> **已與 agy 討論定案並修改 `gemini_gate_classifier.py` 的 prompt**：`SUPERSEDE` 收斂為僅限「純技術/聯絡類中繼資料的無爭議更迭」（電話、地址、Email、軟體版本號、序號）；只要涉及人員/職務/責任歸屬，或使用者的偏好、能力、允許狀態被否定/推翻，一律歸類 `CONFLICT_DETECTED`，不因表面上「像是單一值被取代」就自動放行。**尚待重新部署後用實際案例（含 agy 提供的 4 組對照測試）重新驗證行為符合預期**，見下方部署清單。
 
 ### 2.6 CI/CD 自動化（延後，不影響上線）
 - [ ] 比照 NoCode_Project `deploy-python-backend.yml` 新增 `deploy-mnemosyne.yml`：偵測 `MCP_Service/**` 變更 → SSH 進 GCE → `git pull` → 安裝依賴 → `systemctl restart mnemosyne`

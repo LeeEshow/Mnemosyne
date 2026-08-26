@@ -174,3 +174,21 @@ that has no matching `Upgrade` header is malformed; use `proxy_set_header Connec
 off;` instead. This config lives in the `fintarck-proxy` Cloud Run service's own repo/source, not in this
 one — redeploy via `gcloud run deploy fintarck-proxy --source . --region asia-east1
 --allow-unauthenticated --port 8080` from that source directory after editing `nginx.conf`.
+
+## Gemini API: personal API key vs Vertex AI
+
+Both `infrastructure/gemini_gate_classifier.py` and `infrastructure/vertex_embedding_provider.py` check
+`os.environ.get("GEMINI_API_KEY")` first — if set, they construct `genai.Client(api_key=...)` against
+Google AI Studio (billed against the personal subscription tied to that key) instead of
+`genai.Client(vertexai=True, project=..., location=...)` (billed against `mnemosyne-cb868`'s GCP billing
+account). This was a deliberate switch to move AI usage cost off GCP billing and onto an existing personal
+subscription — not a fallback/dev-mode toggle, so don't "clean it up" by removing the Vertex branch.
+
+**Embedding model is tied to which client mode is active and the two are not interchangeable.**
+`config.EMBEDDING_MODEL` resolves to `text-embedding-004` (Google AI Studio) when `GEMINI_API_KEY` is set,
+or `text-multilingual-embedding-002` (Vertex AI) otherwise — these produce vectors in different embedding
+spaces, so **switching `GEMINI_API_KEY` on or off after any memories already exist invalidates every stored
+`embedding` field**: old vectors were computed by the other model and are no longer comparable to new
+queries. There is no migration path for this — the fix is wiping and re-adding memories after a switch, not
+recomputing embeddings in place. If billing is ever a concern again, deciding whether to touch
+`GEMINI_API_KEY` should factor in this cost, not just the Vertex AI dollar amount.
