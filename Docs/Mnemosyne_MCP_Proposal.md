@@ -22,11 +22,21 @@
 * **做法**：結合 NoSQL 的關聯式欄位（如 `type` 類別、`tags` 標籤、`created_at` 時間戳記）與向量欄位，進行「前置過濾混合搜尋」（Filtered Vector Search）。
 
 ### 2.3 跨領域隔離與全域共享 (Domain Namespace)
-不綁定特定專案，但為了避免跨領域（如 coding 助理與理財助理）的語意污染，底層資料結構設計有 `domain` 欄位進行剛性分區（見第 4 章）。向量空間是連續的，語意相近但領域無關的記憶（例如「策略」「風險」「優化」在理財與寫程式脈絡都會出現）可能互相污染 Top-K 結果，因此不能只靠 `tags` 這類選填標籤，需要一個必填、由 Client 端固定帶入的分區欄位。
+不綁定特定專案，但為了避免跨領域（如 coding 助理與理財助理）的語意污染，底層資料結構設計有 `domain` 欄位進行**資料庫端硬過濾**（見第 4 章）。這裡刻意選「過濾」而非「排序」——曾經討論過把 `domain` 降級成應用層過濾（全域向量搜尋後再篩選），但這只能**降低**跨領域污染機率、無法**消除**：當某個 domain 資料量遠少於其他 domain 時，稀疏 domain 的真實相關記憶可能被大量資料的 domain 排擠出 Top-K 候選集，排序權重救不回一筆連候選都進不去的記憶。因此最終定案維持 DB 端硬過濾。
 
-同時，為了解決跨領域通用的個人偏好設定（例如「回覆一律繁體中文」、「不使用表情符號」），特別保留一個 `"global"` 特殊領域。檢索時，系統會自動包含當前 `domain` 與 `"global"` 下的記憶（見 5.2）。
+同時，為了解決跨領域通用的個人偏好設定（例如「回覆一律繁體中文」、「不使用表情符號」），特別保留一個 `"global"` 特殊領域，檢索時自動與指定 domain 一併查詢（見 5.2）。
 
 > **範圍界定**：本專案為**個人專屬**記憶體，不考慮多使用者隔離，因此不需要 `user_id` / `app_id`，亦不涉及多租戶層級的權限控制。`domain` 分區與多租戶隔離目的不同——多租戶隔離是為了資料所有權/存取控制，`domain` 純粹是為了避免同一個人的不同助理情境互相干擾檢索結果，兩者不可混為一談。
+
+**輕量工作階段狀態（Lightweight Session State）+ 白名單覆寫**：`domain` 的預設值在 MCP 連線建立時由 Server 端 middleware 綁定（見 3.3），這是有意的**狀態**設計，不是無狀態——早期一度誤稱這個機制為「無狀態」，已修正用詞。為了解決「一個領域一條連線」的設定摩擦，連線可以額外攜帶 `allowed_overrides` 白名單（例如 `?domain=coding&allowed_overrides=finance,life`，或個人使用情境下可設 `allowed_overrides=*` 表示不限制），`save_memory`/`search_memories` 因此開放一個可選參數 `domain_override`（見 5 章）：不帶則沿用連線預設 domain（多數 Client，如 Cursor，維持零風險鎖死，白名單留空即可）；帶了則必須通過白名單驗證才生效，驗證通過後 DB 查詢直接鎖定該 override 值做硬過濾，不因為允許覆寫就放棄過濾保證。
+
+### 2.5 因果記憶模型 (Causal Memory Model)
+記憶不是孤立的事實清單，而是有「因為什麼、所以得到什麼結論」的因果關係——上一個結論也可能成為下一次判斷的因，反覆修正、疊代形成價值觀。這個人類認知仿生的觀察，直接影響第 4 章的 Schema 設計：
+
+* 每筆記憶拆成 **`because`（因，精煉脈絡）** 與 **`then`（果，決策/結論）** 兩個欄位，取代單一的 `context` 自由文本。比起「因」，「果」才是實際會被套用的行為依據，但沒有「因」的脈絡，AI 無法判斷這個結論在新情境下還適不適用。
+* 新的因如果命中舊的果 → 沿用（對應寫入閘門的 `NOOP`）；不命中 → 修正，舊的果成為推導新果的脈絡之一（對應 `SUPERSEDE`），舊記憶標記失效但不刪除。
+* 因為任務執行的結果本質上也是一組因果記錄（因＝任務過程與成因，果＝經驗教訓），**`reflect_on_task` 不再是獨立工具**，直接併入 `save_memory`（見 5.1），同時也消除了原本一直沒收斂的「AI 該如何判斷該不該呼叫 `reflect_on_task`」這個啟發式規則難題。
+* 完整的因果演變歷史不用另外設計圖狀結構儲存——`superseded_by`（見第 4 章）反向查詢即可拼湊：要找「這筆記憶修正了什麼」，查詢「誰的 `superseded_by` 指向這筆」即可。這個欄位因此身兼「稽核軌跡」與「因果鏈的邊」雙重角色。
 
 ### 2.4 不存清單 (Exclusion List)
 高訊雜比不是只靠「怎麼精煉摘要」達成，更要明確定義「什麼永遠不該存」，否則資料庫會隨時間被大量可從其他管道推導出的資訊淹沒，訊噪比必然隨規模下降。以下內容**禁止**寫入 `memories`：
@@ -79,7 +89,7 @@ graph TD
 
 ```
 MCP Client (Cursor / Claude Desktop / 理財網頁)
-  └─ https://<proxy-host>/mnemosyne/mcp?key=<MNEMOSYNE_MCP_KEY>&domain=<coding|finance|life>
+  └─ https://<proxy-host>/mnemosyne/mcp?key=<MNEMOSYNE_MCP_KEY>&domain=<coding|finance|life>&allowed_overrides=<白名單，可留空或設為 *>
        └─ Cloud Run Proxy（Nginx reverse proxy，SSE 長連線 proxy_read_timeout）
             └─ GCE e2-micro（與 NoCode_Project 的 fintarck-backend **共用同一台主機**，另開一個 port 跑獨立的 systemd service，例如 mnemosyne.service）
                  └─ Firestore（**獨立的 GCP 專案**，不與 nocode-finance 共用配額）
@@ -134,74 +144,84 @@ server {
 
 ## 4. 資料庫結構設計 (Database Schema)
 
-在 Firestore 中建立名為 `memories` 的集合 (Collection)，每筆 Document 的欄位定義如下：
+在 Firestore 中建立名為 `memories` 的集合 (Collection)，每筆 Document 的欄位定義如下（13 欄位，精簡自初版的 14 欄位，見章末異動說明）：
 
 | 欄位名稱 (Field) | 資料型別 (Type) | 必填 | 說明 |
 | :--- | :--- | :---: | :--- |
-| `type` | `String` | 🟢 | **記憶類別**。例如：`"Notes"`(筆記)、`"DailyReport"`(決策報告)、`"Preference"`(個人喜好)、`"Code"`(代碼知識)、`"Reflection"`(任務反思)。 |
-| `domain` | `String` | 🟢 | **領域分區**。由 MCP Client 連線設定固定帶入（如 `"coding"` / `"finance"` / `"life"`），避免跨領域語意污染。特殊值 `"global"` 保留給跨領域都適用的通用偏好（如語言/格式偏好），查詢時永遠與指定 domain 一併檢索（見 5.2）。 |
-| `title` | `String` | 🟢 | **記憶主題簡稱**。例如：`"FastAPI 解決 CORS 跨網域設定"`。可用於 UI 列表顯示。 |
-| `context` | `String` | 🟢 | **精煉內容（限制 500 字內）**。提供給 AI 的實際上下文。建議內部再拆出 `why`（成因/脈絡）與 `how_to_apply`（適用情境）兩個子片段，而非單純自由文本，方便檢索後判斷是否該套用。 |
-| `embedding` | `VectorValue` | 🟢 | **向量值**。儲存 `context`（或 `title + context`）的向量嵌入值。若記憶內容經 `UPDATE` 合併而變動，**必須連同重新計算並覆寫此欄位**，否則向量會與文字內容脫鉤。 |
-| `created_at` | `Timestamp` | 🟢 | **建立時間**。可用於時間維度的排序或限制（如「只搜尋近三個月的記憶」）。 |
-| `tags` | `Array (String)`| ⚪ | **標籤數組**。例如：`["python", "fastapi"]`、`["0056"]`。除了輔助分類，也是 5.2 精確匹配軌道（`array-contains-any`）的查詢依據，寫入時應把精確技術字串（錯誤代碼、函式名、股票代號）也存入 `tags`，彌補向量檢索對精確字串比對能力較弱的問題。 |
-| `source_id` | `String` | ⚪ | **溯源 ID**。若來自某個特定對話對話或事件快照，可記錄其 ID，便於 UI 點擊追溯。 |
+| `type` | `String` | 🟢 | **記憶類別**。例如：`"Notes"`(筆記)、`"DailyReport"`(決策報告)、`"Preference"`(個人喜好)、`"Code"`(代碼知識)。原 `"Reflection"` 類別隨 `reflect_on_task` 併入 `save_memory`（見 2.5）而不再需要獨立列舉。 |
+| `domain` | `String` | 🟢 | **領域分區**。由 MCP Client 連線設定固定帶入（如 `"coding"` / `"finance"` / `"life"`），避免跨領域語意污染，DB 端硬過濾（見 2.3、4.1）。特殊值 `"global"` 保留給跨領域都適用的通用偏好，查詢時永遠與指定 domain 一併檢索（見 5.2）。 |
+| `title` | `String` | 🟢 | **記憶主題簡稱**。人工介入整理資料（如手動封存、Dashboard 瀏覽）時用於快速辨識，即使 `context` 已拆成 `because`/`then` 仍保留獨立欄位。 |
+| `because` | `String` | 🟢 | **因（精煉脈絡，限制 500 字內）**。促成這筆記憶的情境或前提，取代原本的 `context` 欄位。 |
+| `then` | `String` | 🟢 | **果（決策/結論）**。實際會被套用的行為依據，見 2.5 因果記憶模型。`because`+`then` 合併嵌入向量（見下方 `embedding` 說明）。 |
+| `embedding` | `VectorValue` | 🟢 | **向量值**。儲存 `title + because + then` 的向量嵌入值。若記憶內容經 `UPDATE`/`SUPERSEDE` 而變動，**必須連同重新計算並覆寫此欄位**，否則向量會與文字內容脫鉤。 |
+| `created_at` | `Timestamp` | 🟢 | **建立時間**。衰減排序（6.1）`recency` 項直接引用。 |
+| `tags` | `Array (String)`| ⚪ | **標籤數組**。除了精確技術字串（錯誤代碼、函式名、股票代號），**也必須**涵蓋記憶內容的核心主題實體（人名、食物、具體事物、關鍵概念）——這是 5.2 精確匹配軌道與 5.1 標籤交集衝突偵測機制能否運作的前提，見 5.0 原則 6。 |
 | `importance_score` | `Integer (1-10)` | 🟢 | **重要性評分**。寫入當下由 AI 自評，用於檢索排序加權，避免純靠向量相似度導致重要記憶被稀釋。 |
-| `is_pinned` | `Boolean` | 🟢 | **常駐標記**。由 AI 或使用者透過 `pin_memory`（5.5）明確標記，而非僅依賴 `importance_score` 自動判斷，避免高分記憶隨時間累積過多、造成常駐清單膨脹。預設 `false`。 |
+| `is_pinned` | `Boolean` | 🟢 | **常駐標記**。由 AI 或使用者透過 `pin_memory`（5.4）明確標記，而非僅依賴 `importance_score` 自動判斷，避免高分記憶隨時間累積過多、造成常駐清單膨脹。預設 `false`。 |
 | `status` | `String` | 🟢 | **記憶狀態**：`"active"`(生效中) / `"superseded"`(已被取代) / `"archived"`(已固化封存)。取代直接刪除，保留稽核軌跡。預設 `"active"`。 |
-| `superseded_by` | `String` | ⚪ | **取代者 ID**。若此記憶已被更新的記憶推翻，記錄新記憶的 `doc_id`，用於追溯記憶演變過程。 |
-| `last_accessed_at` | `Timestamp` | ⚪ | **最近一次被檢索到的時間**。每次 `search_memories` 命中時更新，供衰減排序與固化判斷使用。 |
-| `access_count` | `Integer` | ⚪ | **被檢索命中次數**。長期低命中的記憶為「記憶固化」的候選對象。 |
+| `superseded_by` | `String` | ⚪ | **取代者 ID**。若此記憶已被更新的記憶推翻，記錄新記憶的 `doc_id`。身兼雙重角色：(1) 稽核軌跡；(2) **因果鏈的邊**——要追溯「這筆記憶修正了什麼」，反向查詢「誰的 `superseded_by` 指向這筆」即可，不需要額外的鏈結欄位或圖狀結構（見 2.5）。 |
+| `access_count` | `Integer` | ⚪ | **被檢索命中次數**。衰減排序（6.1）`access_frequency` 項直接引用，也是 Phase 4 定期固化的候選判斷依據。 |
+
+**欄位精簡異動說明**（原 14 欄位 → 現 13 欄位）：
+* **刪除 `source_id`**：全專案（Phase 1-4 Roadmap）沒有任何機制實際讀寫這個欄位，屬於「以防萬一」的預先設計，不符合 2.4 節不存清單的 YAGNI 精神；原本設想的「因果鏈追溯」用途，改用 `superseded_by` 反向查詢即可滿足，不需要專門欄位。
+* **刪除 `last_accessed_at`**：核對 6.1 節衰減排序公式後發現，`recency` 項用的是 `created_at`、`access_frequency` 項用的是 `access_count`，這個欄位從未被任何公式或機制實際引用，是純粹冗餘欄位。
+* **`context` 拆分為 `because`/`then`**：因果記憶模型（2.5）的核心改動，欄位數 +1，但語意更明確，非意外膨脹。
 
 ### 4.1 索引策略 (Indexing Strategy)
 Firestore 向量搜尋（`find_neighbors`）與一般 `where` 條件合併查詢時，強制要求為該組合建立複合索引，且對 `IN` 等運算子的支援度有限、容易在動態查詢組合下出錯。為避免索引數量隨查詢條件組合爆炸，採取以下限縮策略：
 
-* **DB 端只固定一組複合索引**：`domain (ASC) + status (ASC) + embedding (Vector)`。所有向量查詢一律走這個索引，不隨 `type`/`tags` 動態變化。
+* **DB 端只固定一組複合索引**：`domain (ASC) + status (ASC) + embedding (Vector)`。所有向量查詢一律走這個索引，不隨 `type`/`tags` 動態變化。`domain` 維持 DB 端硬過濾（見 2.3），`domain_override`（見 5.1/5.2）驗證通過後，查詢時同樣代入這個索引，不需要額外索引。
 * **`type` 過濾**：不進 DB 查詢，改為向量查詢取回 Top-K（如 K=40）後，於應用層（Python）過濾。
-* **`tags` 過濾**：分兩種用途處理——輔助篩選一樣用應用層過濾；但作為「精確匹配軌道」時（見 5.2），改用單欄位 `array-contains-any` 查詢，這是 Firestore 原生支援、不需複合索引的查詢型態。
+* **`tags` 過濾**：分兩種用途處理——輔助篩選一樣用應用層過濾；但作為「精確匹配軌道」（5.2）或「寫入閘門標籤交集軌道」（5.1）時，改用單欄位 `array-contains-any` 查詢，這是 Firestore 原生支援、不需複合索引的查詢型態；查詢結果的 `domain`/`status` 過濾放在應用層做，避免額外複合索引需求。
 * **`domain` 的 `global` 特例不使用 `IN` 運算子**：改為對 `domain == 指定值` 與 `domain == "global"` 各發送一次獨立的向量查詢（`asyncio.gather` 並行），在應用層依 Document ID 去重合併，完全避開向量搜尋結合 `IN` 的相容性風險，且仍只需要上述單一複合索引。
 
 ---
 
 ## 5. MCP Tool 介面定義 (API Specification)
 
-Mnemosyne MCP Server 將對外暴露七個核心工具 (Tools) 供 AI Agent 調用。
+Mnemosyne MCP Server 將對外暴露**六個**核心工具 (Tools) 供 AI Agent 調用（原 `reflect_on_task` 已依 2.5 節因果模型併入 `save_memory`，不再獨立）。
 
-> **`domain` 不是工具參數，而是連線層級的上下文**：依 3.3 節部署設計，`domain` 在 MCP 連線建立時由 URL query string 固定帶入（如 `...?domain=coding`），Server 端在連線建立時就綁定該值，之後這條連線呼叫的所有工具都自動套用，不需要、也不應該由 AI 在每次呼叫時額外傳入——這樣可以避免 AI 忘記帶或臨時改動造成跨領域污染（見 2.3）。以下各工具的參數列表因此不再列出 `domain`。
+> **`domain` 預設不是工具參數，而是連線層級的上下文，但可透過 `domain_override` 有限度覆寫**：依 2.3 / 3.3 節設計，`domain` 在 MCP 連線建立時由 URL query string 固定帶入（如 `...?domain=coding`），Server 端在連線建立時就綁定該值，之後這條連線呼叫的所有工具預設自動套用，不需要 AI 每次額外傳入。若連線設定時帶了 `allowed_overrides` 白名單，`save_memory`/`search_memories` 可傳入可選參數 `domain_override`，經白名單驗證後才生效；未通過驗證則忽略，沿用連線預設值。這樣多數 Client（白名單留空）維持零風險鎖死，同時給需要彈性的 Client 一個受控的逃生門，不必為每個新 domain 另開一條連線。
 
 ### 5.0 Tool Description 撰寫原則
 
 MCP Tool 的 `description` 字串會被直接注入 AI 的 context，直接影響 AI「該不該呼叫」「呼叫哪個」的判斷品質，因此撰寫時遵循以下設計原則（各工具收斂後的實際文字定案於 `MCP_Service/Task.md` 2.1 節，此處只記錄原則本身，避免規格文字分散兩處造成不同步）：
 
 1. **開頭寫觸發情境，不是功能敘述**：LLM 決定是否呼叫工具主要看「情境符不符合」，不是「工具做什麼」，第一句話應是「當...時使用」。
-2. **不要求 AI 傳入 `domain`，但要讓 AI 知道自己的範圍有邊界**：描述中不能出現讓 AI 自行生成 `domain` 值傳入的暗示；但反過來要讓 AI 知道檢索/寫入範圍已被連線層級鎖定，避免「查無結果」被誤判成「使用者從未提過」而產生錯誤斷言，而不是誠實地說明自己看不到那個範圍。
-3. **容易混淆的工具要互相排除對方負責的情境**：例如 `save_memory`（討論中即時記錄）與 `reflect_on_task`（任務結束後的回顧）用途相近，兩邊描述都需明講「若是另一種情境，請改用另一個工具」。
-4. **明確揭露 AI 不用自己做的前置檢查，也要反過來明講必要的前置查詢**：`save_memory` 內建寫入閘門會自動去重合併（5.1），不需要 AI 自己先呼叫 `search_memories` 確認重複；但 `forget_memory` / `pin_memory` 需要 `doc_id`，必須先呼叫 `search_memories` 取得，兩種情況都要在描述中寫清楚，不能只強調前者造成誤導。
-5. **內部演算法細節不寫進會被注入 context 的 description**：寫入閘門三段式判定邏輯（5.1）、衰減排序公式（6.1）等屬於 Server 內部行為，AI 不需要知道細節就能正確使用工具，寫太細只會浪費注入 context 的 token，並可能誤導 AI 以為自己該介入控制。
-6. **參數層級的硬限制與判斷依據要寫在該參數自己的 description，並附具體範例**：例如 `search_memories.exact_tags` 與 `save_memory.tags` 都該明確舉例「錯誤代碼、函式名、股票代號」等精確技術字串該填入的情境，而不是籠統帶過；`context` 的 500 字限制同理寫在參數說明而非工具總說明。
+2. **不要求 AI 傳入 `domain`，但要讓 AI 知道自己的範圍有邊界**：描述中不能出現讓 AI 自行生成 `domain` 值傳入的暗示（`domain_override` 除外，見下方 5.1/5.2 說明）；但反過來要讓 AI 知道檢索/寫入範圍已被連線層級鎖定，避免「查無結果」被誤判成「使用者從未提過」而產生錯誤斷言，而不是誠實地說明自己看不到那個範圍。
+3. **明確揭露 AI 不用自己做的前置檢查，也要反過來明講必要的前置查詢**：`save_memory` 內建寫入閘門會自動去重合併（5.1），不需要 AI 自己先呼叫 `search_memories` 確認重複；但 `forget_memory` / `pin_memory` 需要 `doc_id`，必須先呼叫 `search_memories` 取得，兩種情況都要在描述中寫清楚，不能只強調前者造成誤導。
+4. **內部演算法細節不寫進會被注入 context 的 description**：寫入閘門判定邏輯（5.1）、衰減排序公式（6.1）等屬於 Server 內部行為，AI 不需要知道細節就能正確使用工具，寫太細只會浪費注入 context 的 token，並可能誤導 AI 以為自己該介入控制。
+5. **參數層級的硬限制與判斷依據要寫在該參數自己的 description，並附具體範例**：例如 `search_memories.exact_tags` 與 `save_memory.tags` 都該明確舉例該填入的情境，而不是籠統帶過；`because`/`then` 的 500 字限制同理寫在參數說明而非工具總說明。
+6. **`tags` 的撰寫指引不能只鎖定技術字串**：除了錯誤代碼、函式名、股票代號等精確技術字串，也**必須**強烈引導 AI 提取記憶內容中的**核心主題實體**（人名、食物、具體事物、關鍵概念），這是 5.1 節「標籤交集衝突偵測」機制能否觸發的前提——如果 AI 不會把一般性主題詞存進 `tags`，衝突偵測從源頭就不會運作。
+7. **牽涉不可逆動作或衝突判定的規則，用不可協商的強制語氣**：例如 5.1 節「偵測到衝突必須先問使用者、不可自行判斷執行」這類規則，不能寫成建議語氣，必須用「⚠️ 硬性規則」等明確標記，降低 AI 自行裁量繞過的機率。
 
 ### 5.1 `save_memory`
 > **功能**：由 AI 助理主動呼叫，將討論精華轉化為向量並存入資料庫。**寫入前會先經過「寫入閘門」，避免重複與衝突資訊持續累積。閘門為同步執行**（非背景任務）——考量個人規模的寫入頻率不高，同步呼叫 LLM 判定的延遲可接受，優先維持實作簡單，不引入額外的任務佇列基礎設施。
 
 * **輸入參數**：
   * `title` (string, required): 記憶主題。
-  * `context` (string, required): 限制 500 字內的摘要內容，建議內部區分 `why` 與 `how_to_apply`。
+  * `because` (string, required): 因——限制 500 字內的精煉脈絡。
+  * `then` (string, required): 果——決策/結論，實際會被套用的行為依據（見 2.5）。若這是任務結果的回顧（原 `reflect_on_task` 用途），`because` 填任務過程與成因、`then` 填經驗教訓，不需要另外呼叫別的工具。
   * `type` (string, required): 記憶類別（如 `Notes`, `DailyReport`, `Preference`）。
-  * `tags` (array of strings, optional): 關聯標籤，含精確技術字串（見 4 章 `tags` 說明）。
-  * `source_id` (string, optional): 原始資料/對話關聯 ID。
+  * `tags` (array of strings, optional): 關聯標籤，**除了精確技術字串，也務必包含核心主題實體**（見 4 章 `tags` 說明、5.0 原則 6）。
   * `importance_score` (integer 1-10, optional): AI 自評重要性，未提供則預設中間值。
-* **後台邏輯（寫入閘門 Write-time Gate，三段式同步判定）**：
-  1. 將 `context` 向量化，在同一 `domain` 內查詢既有記憶的最近鄰相似度。
-  2. 依相似度分三段處理（門檻值定義於 `config.py`，起始值基於 `text-multilingual-embedding-002`，可日後依實測調整）：
-     * **字串完全相同（正規化後）**：直接 **NOOP**，不呼叫 LLM，僅更新既有記憶的 `last_accessed_at`。
-     * **相似度低於低閾值（`LOW_THRESHOLD = 0.85`）**：直接 **ADD**，視為全新記憶，不呼叫 LLM。低於此值代表用詞與結構已有明顯差異，混淆風險低，不需要耗費 LLM 呼叫。
-     * **相似度介於 0.85 與 1.0 之間（含高相似度區間）**：一律呼叫 **Gemini Flash** 判定，由其選擇：
+  * `domain_override` (string, optional): 見 2.3/5 章開頭說明，僅在連線白名單允許時生效，未通過驗證則忽略。
+* **後台邏輯（寫入閘門 Write-time Gate，同步判定）**：
+  1. **雙軌並行候選查詢**（同 domain 內，`domain_override` 生效時以其取代連線預設值）：
+     * **軌道 A（向量）**：將 `title+because+then` 向量化，查詢同 domain 內最近鄰，取回 Top-3（`WRITE_GATE_CANDIDATE_LIMIT=3`）。
+     * **軌道 B（標籤交集）**：對新記憶的 `tags` 執行 `array-contains-any` 查詢，找出同 domain 內有任一標籤重疊的既有記憶，不受向量相似度限制。
+     * 兩軌結果依 Document ID 去重合併，作為判定閘門的完整候選名單——**軌道 B 的存在是必要的**：修正型的新資訊（例如推翻舊結論的陳述）用詞常與舊記憶差異很大，向量相似度可能遠低於判定門檻，若只看軌道 A 會直接漏掉這類候選，看不出衝突。
+  2. **判定分流**（門檻值定義於 `config.py`，起始值基於 `text-multilingual-embedding-002`，可日後依實測調整）：
+     * **字串完全相同（正規化後）**：直接 **NOOP**，不呼叫 LLM，僅更新既有記憶的 `access_count`。
+     * **候選名單為空，或所有候選相似度皆低於 `LOW_THRESHOLD = 0.85` 且無標籤交集**：直接 **ADD**，視為全新記憶，不呼叫 LLM。
+     * **其餘情況**（相似度 ≥ 0.85，**或**存在標籤交集的候選，不論相似度高低）：一律呼叫 **Gemini Flash** 判定，由其選擇：
        * **NOOP**：語意重複，不寫入。
        * **UPDATE**：屬於既有記憶的補充延伸（例如新增一項並存事實），合併內容並**重新計算 `embedding`**，不可只改文字不更新向量。
-       * **SUPERSEDE**：新資訊推翻舊記憶，將舊記憶 `status` 設為 `"superseded"` 並填入 `superseded_by`，再寫入新記憶。
-       * **ADD**：LLM 判斷雖相似度高但實為獨立事件，視為全新記憶寫入。
+       * **SUPERSEDE**：新資訊推翻舊記憶（因果模型的「修正」，見 2.5）。Gemini Flash 在判定的同一次呼叫中，**同時生成新記憶的 `because`/`then`**——以「重新摘要」而非「逐字串接」的方式，把舊結論、新資訊、修正後結論整合成一段簡潔敘事，維持 `active` 記憶的精確與簡潔；完整的歷史演變過程不寫進文字內容，改由 `superseded_by` 鏈結、需要時由 Python 遞迴查詢還原，避免文字內容隨修正次數滾雪球膨脹。舊記憶 `status` 設為 `"superseded"` 並填入 `superseded_by`。
+       * **CONFLICT_DETECTED**：若 Gemini Flash 判定新舊記憶存在**邏輯矛盾**（而非單純的延伸或無關），**拒絕寫入**，回傳 `decision="conflict_detected"`，附帶衝突的舊記憶 `doc_id` 與內容。
+       * **ADD**：LLM 判斷雖有相似度或標籤交集但實為獨立事件，視為全新記憶寫入。
 
-  > 高相似度不代表「語意重複」，可能只是「舊記憶的超集合」（例如新句子在舊句子基礎上多了一項資訊）——這種情況必須交由 LLM 判斷合併方式，不能單純以相似度分數直接 NOOP，否則會遺失新增資訊。
+  > ⚠️ **硬性規則**：當 `save_memory` 回傳 `decision="conflict_detected"` 時，AI **必須**立刻暫停所有操作，在對話中向使用者詳細說明新舊記憶的衝突內容，並詢問使用者要「覆蓋」還是「並存」。AI **絕對不可**在未取得使用者明確回覆前，擅自呼叫 `forget_memory` 或自行判斷處理。取得回覆後：若選擇覆蓋，AI 呼叫 `forget_memory(doc_id=<舊記憶>)` 封存，再重新呼叫 `save_memory` 存入新記憶；若選擇並存，由 AI 引導使用者或自行調整文字脈絡後重新存入。
 
 ### 5.2 `search_memories`
 > **功能**：當使用者詢問過去的事情或需要歷史脈絡時，AI 助理調用此工具檢索相似記憶。採用「雙軌並行檢索 + 應用層合併 + 衰減排序」的混合檢索器，彌補純向量搜尋在精確字串比對與 Top-K 截斷上的弱點。
@@ -209,14 +229,15 @@ MCP Tool 的 `description` 字串會被直接注入 AI 的 context，直接影�
 * **輸入參數**：
   * `query` (string, required): 查詢字句（例如：「上次討論 0056 的停利點設定是什麼？」）。
   * `type` (string, optional): 指定記憶類別進行過濾（應用層過濾，見 4.1）。
-  * `exact_tags` (array of strings, optional): 需要精確比對的關鍵字（如錯誤代碼、股票代號），觸發精確匹配軌道。
+  * `exact_tags` (array of strings, optional): 需要精確比對的關鍵字（如錯誤代碼、股票代號、主題實體），觸發精確匹配軌道。
+  * `domain_override` (string, optional): 同 5.1 說明。
   * `limit` (integer, optional, default=3): 返回的最大記憶數量。
-  * `include_superseded` / `include_archived` (boolean, optional, default=false): 是否納入非 `active` 狀態的記憶（供「深度搜尋」挖掘已封存內容）。
+  * `include_superseded` / `include_archived` (boolean, optional, default=false): 是否納入非 `active` 狀態的記憶（供「深度搜尋」挖掘已封存內容或因果演變歷史）。
 * **後台邏輯**：
-  1. **向量軌道（並行）**：將 `query` 向量化，透過 `asyncio.gather` 同時對 `domain == 指定值` 與 `domain == "global"` 各發送一次向量查詢（見 4.1 索引策略），K 值不對稱設定（如指定 domain K=40、global K=10），避免不必要的讀取與運算量。
+  1. **向量軌道（並行）**：將 `query` 向量化，透過 `asyncio.gather` 同時對 `domain == 指定值（或 domain_override）` 與 `domain == "global"` 各發送一次向量查詢（見 4.1 索引策略），K 值不對稱設定（如指定 domain K=40、global K=10），避免不必要的讀取與運算量。
   2. **精確匹配軌道（並行）**：若提供 `exact_tags`，並行對 `tags array-contains-any exact_tags` 發送查詢，不受向量相似度限制。
   3. **合併與排序**：三路結果依 Document ID 去重合併後，統一套用 **衰減排序公式**（詳見 6.1）重新排序，而非單純以向量相似度排序。預設排除 `status != "active"`，除非 `include_superseded`/`include_archived` 為 `true`。
-  4. 回傳 Top-K 的 `context` 列表，同步更新命中記憶的 `last_accessed_at` 與 `access_count`。
+  4. 回傳 Top-K 的 `because`/`then` 列表，同步更新命中記憶的 `access_count`。
 
 ### 5.3 `forget_memory`
 > **功能**：將記憶下架。預設為「軟刪除」（標記封存），僅在明確指定時才真正硬刪除。
@@ -225,17 +246,7 @@ MCP Tool 的 `description` 字串會被直接注入 AI 的 context，直接影�
   * `doc_id` (string, required): Firestore 文件 ID。
   * `hard_delete` (boolean, optional, default=false): 為 `true` 時才真正刪除文件；預設僅將 `status` 設為 `"archived"`，保留稽核軌跡。
 
-### 5.4 `reflect_on_task`
-> **功能**：任務／討論告一段落時，由 AI 主動呼叫，針對剛完成的工作做自我反思，產出「這次做對/做錯在哪」的經驗記錄，對應第 6 章的經驗學習機制。屬於 `save_memory` 的特化用法（固定 `type="Reflection"`），差異在於觸發時機是任務結束後的自我檢視，而非討論中即時判斷。
-
-* **輸入參數**：
-  * `task_summary` (string, required): 任務內容簡述。
-  * `outcome` (string, required): `"success"` / `"failure"` / `"partial"`。
-  * `lesson` (string, required): 精煉後的經驗教訓（限制 500 字內），沿用 `why` / `how_to_apply` 結構。
-  * `tags` (array of strings, optional)。
-* **後台邏輯**：同 `save_memory` 的寫入閘門流程，`type` 固定為 `"Reflection"`。
-
-### 5.5 `pin_memory` / `unpin_memory`
+### 5.4 `pin_memory` / `unpin_memory`
 > **功能**：明確標記／取消標記某筆記憶為「常駐記憶」，解決衰減排序（6.1）中極端重要但可能被向量 Top-K 截斷、或因權重不足而排不進結果的問題。採**明確標記制**而非分數自動判斷，避免常駐清單隨 `importance_score` 高分記憶累積而無限膨脹。
 
 * **輸入參數**：
@@ -243,12 +254,13 @@ MCP Tool 的 `description` 字串會被直接注入 AI 的 context，直接影�
   * （`unpin_memory` 同參數，將 `is_pinned` 設回 `false`）
 * **後台邏輯**：更新該筆記憶的 `is_pinned` 欄位。
 
-### 5.6 `load_pinned_memories`
+### 5.5 `load_pinned_memories`
 > **功能**：供 MCP Client 在對話開始時呼叫，取得少量常駐記憶直接帶入 context，不經過向量檢索，避免第 5.2 節混合檢索仍可能漏掉「極端重要」記憶的風險。
 
 * **輸入參數**：
+  * `domain_override` (string, optional): 同 5.1 說明。
   * `limit` (integer, optional, default=5): 上限筆數，避免常駐清單膨脹造成 context 污染與 Token 成本增加。
-* **後台邏輯**：並行查詢 `domain == 指定值` 與 `domain == "global"` 且 `is_pinned == true` 且 `status == "active"` 的記憶，在 Python 端合併後，依 `importance_score` 與 `created_at` 降序排序，最後取前 `limit` 筆回傳。
+* **後台邏輯**：並行查詢 `domain == 指定值（或 domain_override）` 與 `domain == "global"` 且 `is_pinned == true` 且 `status == "active"` 的記憶，在 Python 端合併後，依 `importance_score` 與 `created_at` 降序排序，最後取前 `limit` 筆回傳。
 
 ---
 
@@ -283,14 +295,16 @@ score = w1 · relevance(向量相似度)
 
 經 Python 重新計算分數並排序後，最後僅返回 Top-L（如 L=3）的記憶給 AI 助理。此機制能有效讓低重要性、長期未被存取的記憶自然沉底。
 
-### 6.2 經驗學習迴路 (Experience Loop)
-對應 `reflect_on_task` 工具：AI 在完成一項任務後，不等待使用者糾正，主動產出「這次做對/做錯在哪」的反思記錄（`type="Reflection"`）。下次遇到相似任務時，`search_memories` 會將這類記憶檢索出來作為前車之鑑，形成「執行 → 反思 → 檢索復用」的閉環，讓記憶庫從單純的事實/偏好記錄，進一步累積可重用的「經驗法則」。
+### 6.2 因果修正迴路 (Causal Revision Loop)
+原「經驗學習迴路」隨 `reflect_on_task` 併入 `save_memory`（見 2.5）而重新框架：任務結果本質上就是一組因果記錄（`because`=過程與成因、`then`=經驗教訓），AI 完成任務後可直接呼叫 `save_memory` 記錄，不需要獨立工具或獨立的觸發時機判斷。下次遇到相似情境時，`search_memories` 會將這類記憶檢索出來作為前車之鑑；若新情境與舊結論矛盾，則透過 5.1 節的寫入閘門走 `SUPERSEDE` 或 `CONFLICT_DETECTED` 流程，形成「因 → 果 → 檢索復用 → 因情境變化而修正」的持續迴圈，而不是單向累積的事實清單。
 
 ### 6.3 定期固化 (Periodic Consolidation)
-排程（例如每週）掃描符合以下條件的記憶：`created_at` 超過一定期限、`access_count` 偏低、且彼此語意相近（同一批向量分群）。將這群記憶交給 LLM 歸納成一條更高層次的摘要記憶，原始記憶批次標記 `status="archived"`（保留但不再參與主要檢索排序）。這對應人類睡眠固化記憶的機制：細節逐漸退場，留下的是被反覆驗證過的通則。此機制與 6.1 互補——衰減排序處理「排序權重」，定期固化處理「資料庫實際容量」。
+排程（例如每週）掃描符合以下條件的記憶：`created_at` 超過一定期限、`access_count` 偏低、且彼此語意相近（同一批向量分群）。將這群記憶交給 LLM 歸納成一條更高層次的摘要記憶，原始記憶批次標記 `status="archived"`（保留但不再參與主要檢索排序）。這對應人類睡眠固化記憶的機制：細節逐漸退場，留下的是被反覆驗證過的通則。此機制與 6.1 互補——衰減排序處理「排序權重」，定期固化處理「資料庫實際容量」；與 6.2 的差異是，固化處理的是「同一批語意相近的獨立記憶」，因果修正處理的是「同一件事的結論演變」，兩者不衝突。
 
-### 6.4 軟刪除與稽核軌跡
-延續第 5 章 `forget_memory` 與 `save_memory` 寫入閘門的設計：預設不做硬刪除，改以 `status`（`active` / `superseded` / `archived`）與 `superseded_by` 追蹤記憶的生命週期。好處是即使 AI 判斷錯誤，也能回溯記憶被取代或封存的原因，而不是直接遺失資訊。
+### 6.4 軟刪除、稽核軌跡與衝突攔截
+延續第 5 章 `forget_memory` 與 `save_memory` 寫入閘門的設計：預設不做硬刪除，改以 `status`（`active` / `superseded` / `archived`）與 `superseded_by` 追蹤記憶的生命週期，`superseded_by` 同時是因果鏈的邊（見 2.5、4 章）。好處是即使 AI 判斷錯誤，也能回溯記憶被取代或封存的原因，而不是直接遺失資訊。
+
+在此基礎上，5.1 節的 `CONFLICT_DETECTED` 機制補上了最後一塊拼圖：軟刪除/SUPERSEDE 解決的是「系統判斷出這是修正，該怎麼記錄」，但**系統判斷不出來、或判斷為邏輯矛盾（而非延伸）的情況，不該讓 AI 自己決定要覆蓋還是保留**——這類決策交還給使用者本人確認（見 5.1 硬性規則），系統只負責攔截、不負責自動裁定。
 
 ---
 
@@ -308,26 +322,9 @@ score = w1 · relevance(向量相似度)
 
 ## 8. 專案開發里程碑 (Roadmap)
 
-* [ ] **Phase 1: 基礎 API 開發**
-  * 初始化 Python 專案，安裝 `fastapi`, `firebase-admin`, `mcp` 等套件。
-  * 串接 OpenAI / Gemini Embedding API。
-  * 申請獨立的 GCP 專案並啟用 Firestore（Spark 免費方案），與 `nocode-finance` 分開（見 3.3）。
-  * 建立 `memories` 集合完整 Schema（含 `domain`、`is_pinned`、`importance_score`、`status`、`superseded_by`、`last_accessed_at`、`access_count` 等第 4 章全部欄位——這些欄位是寫入閘門與衰減排序的前提，不隨定期固化一起延後）。
-  * 建立第 4.1 節唯一的複合向量索引：`domain (ASC) + status (ASC) + embedding (Vector)`。
-  * 集中設定寫入閘門相似度門檻、衰減排序權重與 `λ` 衰減常數於 `config.py`。
-* [ ] **Phase 2: MCP Server 封裝與部署**
-  * 將 API 封裝成 MCP 標準協定的 SSE over HTTP Server（沿用 NoCode_Project 已驗證的模式，見 3.3）。
-  * 實作連線層級的 `domain` 綁定（從 MCP 連線 URL 的 query string 讀取，見 3.3），取代逐次呼叫傳參數。
-  * 實作 `save_memory` 三段式同步寫入閘門（5.1，含 `UPDATE` 分支的 embedding 重算）。
-  * 實作 `search_memories` 雙軌並行檢索（domain/global 向量軌道 + tags 精確匹配軌道）與衰減排序合併（5.2、6.1）。
-  * 實作 `forget_memory` 軟刪除語意（5.3）、`pin_memory` / `unpin_memory` / `load_pinned_memories`（5.5、5.6）。
-  * 部署至既有 GCE 主機（與 `fintarck-backend` 共用，另開 systemd service 與 port）+ Cloud Run Proxy，設定 `MNEMOSYNE_MCP_KEY` 存取金鑰。
-  * 分別以 `...?domain=coding` 與 `...?domain=finance` 兩條連線在 Cursor / Claude Desktop 進行整合測試，驗證跨領域隔離是否生效。
-* [ ] **Phase 3: 記憶自動精煉與經驗學習**
-  * 設計 Agent prompt 範本，確保 AI 會自動將冗長對話精煉成小於 500 字的 structured summary（含 `why` / `how_to_apply`）。
-  * 實作「會議記錄存檔」與「每日決策報告存檔」自動觸發流程。
-  * 實作 `reflect_on_task`（5.4）經驗學習迴路（6.2）。
-* [ ] **Phase 4: 記憶治理與跨專案優化**
-  * 實作定期固化排程（6.3）與衰減排序公式調校（6.1）。
-  * 在理財專案的前端實作「記憶庫管理」Dashboard，允許檢視記憶狀態變化（`active`/`superseded`/`archived`）、手動封存或硬刪除。
-  * 嘗試擴展到個人的其他開發、日常小工具中。
+* [ ] **Phase 1: 基礎建設**（GCP/Firestore、Python 專案骨架、Embedding/LLM 串接、`config.py` 參數）
+* [ ] **Phase 2: MCP Server 開發與部署**（六個工具、連線層級 domain 綁定 + 白名單覆寫、寫入閘門雙軌候選與衝突偵測、GCE/Nginx/Cloud Run 部署、整合測試）
+* [ ] **Phase 3: 記憶自動精煉**（設計 Agent prompt 範本，引導 AI 判斷「值得存」的時機並精煉成因果結構；原「經驗學習迴路」已因 `reflect_on_task` 併入 `save_memory`（2.5、6.2）而不再是獨立階段性任務）
+* [ ] **Phase 4: 記憶治理與跨專案優化**：實作定期固化排程（6.3）與衰減排序公式調校（6.1）；理財專案前端「記憶庫管理」Dashboard；擴展到其他個人專案
+
+> 詳細任務拆解、進度與實作補充說明見 [MCP_Service/Task.md](../MCP_Service/Task.md)，本節只維持階段性總覽，避免與 Task.md 規格文字重複、日後不同步。
