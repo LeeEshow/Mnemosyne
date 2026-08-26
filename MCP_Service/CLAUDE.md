@@ -113,3 +113,52 @@ inconsistency is intentional, not a typo to "fix."
 **Python version constraint.** The deploy host (GCE, via `fintarck-backend`) is pinned to Python 3.10.12
 and cannot be upgraded (unrelated service depends on that exact version). Don't use stdlib features newer
 than 3.10 (e.g. no `datetime.UTC` — use `datetime.timezone.utc`).
+
+## Deployment gotchas (learned the hard way during Phase 2.5)
+
+These five issues stacked on top of each other during the first real deploy to GCE — none of them were
+config mistakes on our end, each was a genuine environment/library trap. Fix order matters less than
+knowing all five exist, since fixing one just uncovers the next.
+
+**`google-api-core==2.35.0` breaks all Firestore queries.** That specific version has a regression that
+mis-encodes the default database id `(default)` into gRPC requests, so every query (even a plain
+`.collection().get()`) fails with `400 Invalid database id %28default%29` — happens identically whether
+using GCE-attached identity or a service account key file, so don't waste time suspecting credentials.
+The version was pulled from PyPI shortly after release (doesn't show up in `pip index versions` anymore,
+but a venv that installed it before the pull keeps it). `pyproject.toml` pins `google-api-core==2.34.0`
+explicitly — don't remove this pin without confirming a newer release actually fixes the regression.
+
+**GCE VM access scopes are a separate gate from IAM roles.** Granting `Cloud Datastore User` in IAM is not
+enough — the GCE instance's own OAuth access scopes (set at VM creation, `gcloud compute instances
+describe --format="value(serviceAccounts.scopes)"`) must also include `cloud-platform` (or the specific
+Firestore scope), otherwise every Firestore call fails with `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT` before
+IAM is even checked. Changing scopes requires stopping and restarting the whole VM
+(`gcloud compute instances stop/set-service-account/start`) — this is shared with `fintarck-backend`
+(NoCode_Project), so it causes a brief outage of that service too; confirm before doing it.
+
+**`firebase_admin.initialize_app()` needs an explicit `projectId` when the app runs cross-project.**
+Without it, the SDK falls back to the ambient project from GCE metadata credentials — which on this shared
+host is the GCE host's own project, not `mnemosyne-cb868`. `infrastructure/firebase_app.py` passes
+`options={"projectId": config.GOOGLE_CLOUD_PROJECT_ID}` explicitly; don't drop this when touching that file.
+
+**MCP SDK's `sse_app()` has DNS rebinding protection on by default, and it blocks the Cloud Run proxy
+path entirely.** The SDK only accepts requests whose `Host` header is `localhost`/`127.0.0.1`/`::1`. Since
+`fintarck-proxy`'s Nginx forwards the real external Host header (`fintarck-proxy-*.run.app`), every request
+routed through the proxy gets rejected with `421` — and confusingly, this only shows up *after* the key
+passes `KeyAuthMiddleware` (a wrong key returns `401` from our own middleware before ever reaching the
+SDK's check, which made this look like it was somehow key-value-dependent during debugging — it isn't).
+Fix: set `MNEMOSYNE_DISABLE_DNS_REBINDING_PROTECTION=true` in `.env` (safe here since `MNEMOSYNE_MCP_KEY`
+already gates access), or `MNEMOSYNE_ALLOWED_HOSTS=<comma-separated hosts>` to keep the protection but
+allowlist the proxy's hostname. Both are read in `interface/mcp_server.py`'s `_get_transport_security()`.
+
+**Nginx path routing for `/mnemosyne/`**: the backend's real routes are `/sse` (GET, opens the SSE stream)
+and `/messages/` (POST) — not `/mcp`, despite what the connection URL in the Proposal doc implies. The
+`location /mnemosyne/` block's `proxy_pass` **must** end with a trailing slash
+(`proxy_pass http://<GCE_IP>:8001/;`) so Nginx strips the `/mnemosyne/` prefix before forwarding —
+without it the backend receives `/mnemosyne/sse` verbatim and 404s. Don't copy the WebSocket-style
+`proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";` pair into this block
+unconditionally — SSE isn't a WebSocket upgrade, and forcing a literal `Connection: upgrade` on a request
+that has no matching `Upgrade` header is malformed; use `proxy_set_header Connection ""; proxy_buffering
+off;` instead. This config lives in the `fintarck-proxy` Cloud Run service's own repo/source, not in this
+one — redeploy via `gcloud run deploy fintarck-proxy --source . --region asia-east1
+--allow-unauthenticated --port 8080` from that source directory after editing `nginx.conf`.
