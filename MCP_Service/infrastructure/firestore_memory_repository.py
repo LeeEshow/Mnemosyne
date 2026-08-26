@@ -1,8 +1,6 @@
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
 
-import firebase_admin
 from firebase_admin import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
@@ -11,16 +9,14 @@ from google.cloud.firestore_v1.vector import Vector
 
 import config
 from domain.models import Memory, MemoryStatus, MemoryStatusFilter, ScoredMemory
+from infrastructure import firebase_app
 
 _DISTANCE_FIELD = "_vector_distance"
 
 
 class FirestoreMemoryRepository:
     def __init__(self) -> None:
-        try:
-            firebase_admin.get_app()
-        except ValueError:
-            firebase_admin.initialize_app()
+        firebase_app.ensure_initialized()
         self._collection = firestore.client().collection(config.MEMORIES_COLLECTION_NAME)
 
     async def save(self, memory: Memory) -> Memory:
@@ -53,16 +49,16 @@ class FirestoreMemoryRepository:
         ]
 
     async def find_pinned(self, domain: str) -> list[Memory]:
-        snapshots = await asyncio.to_thread(self._query_by_domain, domain)
-        memories = (self._to_memory(snapshot) for snapshot in snapshots)
-        return [
-            memory for memory in memories if memory.is_pinned and memory.status == MemoryStatus.ACTIVE
-        ]
+        snapshots = await asyncio.to_thread(self._query_pinned_by_domain, domain)
+        return [self._to_memory(snapshot) for snapshot in snapshots]
 
     async def overwrite_content(
-        self, memory_id: str, title: str, context: str, embedding: tuple[float, ...]
+        self, memory_id: str, title: str, premise: str, conclusion: str, embedding: tuple[float, ...]
     ) -> None:
-        await self._update(memory_id, {"title": title, "context": context, "embedding": Vector(embedding)})
+        await self._update(
+            memory_id,
+            {"title": title, "premise": premise, "conclusion": conclusion, "embedding": Vector(embedding)},
+        )
 
     async def mark_superseded(self, memory_id: str, superseded_by: str) -> None:
         await self._update(
@@ -83,9 +79,7 @@ class FirestoreMemoryRepository:
 
     async def record_access(self, memory_id: str) -> None:
         increment = firestore.Increment(1)
-        await self._update(
-            memory_id, {"last_accessed_at": datetime.now(timezone.utc), "access_count": increment}
-        )
+        await self._update(memory_id, {"access_count": increment})
 
     async def _update(self, memory_id: str, fields: dict) -> None:
         await asyncio.to_thread(self._collection.document(memory_id).update, fields)
@@ -106,11 +100,16 @@ class FirestoreMemoryRepository:
         return [self._to_scored_memory(snapshot) for snapshot in vector_query.get()]
 
     def _query_by_tags(self, tags: tuple[str, ...]) -> list[DocumentSnapshot]:
-        query = self._collection.where(filter=FieldFilter("tags", "array_contains_any", list(tags)))
+        limited_tags = list(tags[: config.FIRESTORE_ARRAY_CONTAINS_ANY_LIMIT])
+        query = self._collection.where(filter=FieldFilter("tags", "array_contains_any", limited_tags))
         return list(query.get())
 
-    def _query_by_domain(self, domain: str) -> list[DocumentSnapshot]:
-        query = self._collection.where(filter=FieldFilter("domain", "==", domain))
+    def _query_pinned_by_domain(self, domain: str) -> list[DocumentSnapshot]:
+        query = (
+            self._collection.where(filter=FieldFilter("domain", "==", domain))
+            .where(filter=FieldFilter("is_pinned", "==", True))
+            .where(filter=FieldFilter("status", "==", MemoryStatus.ACTIVE.value))
+        )
         return list(query.get())
 
     def _to_document(self, memory: Memory) -> dict:
@@ -118,16 +117,15 @@ class FirestoreMemoryRepository:
             "type": memory.type,
             "domain": memory.domain,
             "title": memory.title,
-            "context": memory.context,
+            "premise": memory.premise,
+            "conclusion": memory.conclusion,
             "embedding": Vector(memory.embedding),
             "created_at": memory.created_at,
             "importance_score": memory.importance_score,
             "is_pinned": memory.is_pinned,
             "status": memory.status.value,
             "tags": list(memory.tags) if memory.tags else [],
-            "source_id": memory.source_id,
             "superseded_by": memory.superseded_by,
-            "last_accessed_at": memory.last_accessed_at,
             "access_count": memory.access_count or 0,
         }
 
@@ -138,16 +136,15 @@ class FirestoreMemoryRepository:
             type=data["type"],
             domain=data["domain"],
             title=data["title"],
-            context=data["context"],
+            premise=data["premise"],
+            conclusion=data["conclusion"],
             embedding=tuple(data["embedding"]),
             created_at=data["created_at"],
             importance_score=data["importance_score"],
             is_pinned=data["is_pinned"],
             status=MemoryStatus(data["status"]),
             tags=tuple(data.get("tags") or ()),
-            source_id=data.get("source_id"),
             superseded_by=data.get("superseded_by"),
-            last_accessed_at=data.get("last_accessed_at"),
             access_count=data.get("access_count"),
         )
 

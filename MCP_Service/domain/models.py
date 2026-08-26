@@ -14,7 +14,8 @@ class Memory:
     type: str
     domain: str
     title: str
-    context: str
+    premise: str
+    conclusion: str
     embedding: tuple[float, ...]
     created_at: datetime
     importance_score: int
@@ -22,9 +23,7 @@ class Memory:
     is_pinned: bool = False
     status: MemoryStatus = MemoryStatus.ACTIVE
     tags: tuple[str, ...] | None = None
-    source_id: str | None = None
     superseded_by: str | None = None
-    last_accessed_at: datetime | None = None
     access_count: int | None = None
 
 
@@ -46,3 +45,10 @@ class MemoryStatusFilter:
         if self.include_archived:
             statuses.append(MemoryStatus.ARCHIVED)
         return tuple(statuses)
+
+
+@dataclass(frozen=True)
+class Domain:
+    name: str
+    description: str
+    created_at: datetime

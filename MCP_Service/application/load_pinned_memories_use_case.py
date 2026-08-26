@@ -1,8 +1,10 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import config
+from application.domain_validation import ensure_domain_registered
 from domain.models import Memory
+from domain.ports.domain_repository import DomainRepository
 from domain.ports.memory_repository import MemoryRepository
 
 
@@ -13,10 +15,13 @@ class LoadPinnedMemoriesRequest:
 
 
 class LoadPinnedMemoriesUseCase:
-    def __init__(self, repository: MemoryRepository) -> None:
+    def __init__(self, repository: MemoryRepository, domain_repository: DomainRepository) -> None:
         self._repository = repository
+        self._domain_repository = domain_repository
 
     async def execute(self, request: LoadPinnedMemoriesRequest) -> tuple[Memory, ...]:
+        domain = await ensure_domain_registered(self._domain_repository, request.domain)
+        request = replace(request, domain=domain)
         domain_task = self._repository.find_pinned(request.domain)
         global_task = self._repository.find_pinned(config.GLOBAL_DOMAIN)
         domain_hits, global_hits = await asyncio.gather(domain_task, global_task)

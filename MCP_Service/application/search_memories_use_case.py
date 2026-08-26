@@ -1,9 +1,11 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 import config
+from application.domain_validation import ensure_domain_registered
 from domain.models import Memory, MemoryStatusFilter, ScoredMemory
+from domain.ports.domain_repository import DomainRepository
 from domain.ports.embedding_provider import EmbeddingProvider
 from domain.ports.memory_repository import MemoryRepository
 from domain.scoring import ScoringParameters, ScoringWeights, calculate_decay_score
@@ -35,11 +37,19 @@ class SearchMemoriesResult:
 
 
 class SearchMemoriesUseCase:
-    def __init__(self, repository: MemoryRepository, embedding_provider: EmbeddingProvider) -> None:
+    def __init__(
+        self,
+        repository: MemoryRepository,
+        embedding_provider: EmbeddingProvider,
+        domain_repository: DomainRepository,
+    ) -> None:
         self._repository = repository
         self._embedding_provider = embedding_provider
+        self._domain_repository = domain_repository
 
     async def execute(self, request: SearchMemoriesRequest) -> SearchMemoriesResult:
+        domain = await ensure_domain_registered(self._domain_repository, request.domain)
+        request = replace(request, domain=domain)
         status_filter = MemoryStatusFilter(request.include_superseded, request.include_archived)
         candidates = await self._gather_candidates(request, status_filter)
         filtered = self._apply_type_filter(candidates, request.type)
@@ -82,7 +92,7 @@ class SearchMemoriesUseCase:
     ) -> dict[str, ScoredMemory]:
         merged = {scored.memory.id: scored for scored in vector_hits}
         for memory in tag_hits:
-            merged.setdefault(memory.id, ScoredMemory(memory, _EXACT_TAG_MATCH_SIMILARITY))
+            merged[memory.id] = ScoredMemory(memory, _EXACT_TAG_MATCH_SIMILARITY)
         return merged
 
     def _apply_type_filter(
