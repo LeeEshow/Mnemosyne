@@ -125,7 +125,8 @@ MCP_Service/
 > **同一輪測試/部署過程中額外發現並修正的問題**：改用個人 Google AI Studio 訂閱的 `GEMINI_API_KEY` 後，`text-embedding-004` 這個模型名稱在 Developer API 不存在（改用 `gemini-embedding-001`，但原生 3072 維超過 Firestore 向量索引 2048 維上限，改用 Matryoshka 截斷至 1536 維，Firestore 複合向量索引已重建）；`gemini-2.5-flash` 對 Google AI Studio 新帳號已下架（改用 `gemini-3.6-flash`）。兩者皆已比照 `GEMINI_API_KEY` 是否設定的模式做條件切換，Vertex AI 退路因索引維度變更暫不可用，詳見 `CLAUDE.md`。
 
 ### 2.6 CI/CD 自動化（延後，不影響上線）
-- [ ] 比照 NoCode_Project `deploy-python-backend.yml` 新增 `deploy-mnemosyne.yml`：偵測 `MCP_Service/**` 變更 → SSH 進 GCE → `git pull` → 安裝依賴 → `systemctl restart mnemosyne`
+- [x] 比照 NoCode_Project `deploy-python-backend.yml` 新增 `.github/workflows/deploy-mnemosyne.yml`：偵測 `MCP_Service/**` 變更 → SSH 進 GCE → `git pull` → `pip install -e .` → `systemctl restart mnemosyne`
+- [ ] **待 PM 手動設定**：GitHub repo `LeeEshow/Mnemosyne` 目前沒有 `GCE_HOST`/`GCE_USER`/`GCE_SSH_KEY` 這三個 Secrets（跟 NoCode_Project 是不同 repo，Secrets 不會共用，需另外新增）。NoCode_Project 的 workflow 已經用同一組值連到同一台主機、同一個使用者，直接把 NoCode_Project repo settings 裡這三個 Secrets 的值複製過來即可，不用重新產生 SSH 金鑰。設定路徑：Mnemosyne repo → Settings → Secrets and variables → Actions → New repository secret。
 
 ---
 

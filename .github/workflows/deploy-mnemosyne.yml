@@ -1,0 +1,28 @@
+name: Deploy Mnemosyne MCP Server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'MCP_Service/**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to GCE via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.GCE_HOST }}
+          username: ${{ secrets.GCE_USER }}
+          key: ${{ secrets.GCE_SSH_KEY }}
+          script: |
+            cd /app-mnemosyne
+            git pull origin main
+            cd MCP_Service
+            .venv/bin/python -m pip install -e . --quiet
+            sudo systemctl restart mnemosyne
+            sleep 3
+            sudo systemctl is-active mnemosyne
