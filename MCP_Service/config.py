@@ -2,6 +2,9 @@ import os
 
 GOOGLE_CLOUD_PROJECT_ID = os.environ.get("MNEMOSYNE_GOOGLE_CLOUD_PROJECT_ID", "mnemosyne-cb868")
 GOOGLE_CLOUD_LOCATION = os.environ.get("MNEMOSYNE_GOOGLE_CLOUD_LOCATION", "asia-east1")
+# Gemini 系列模型在 Vertex AI 的可用區域比 embedding 模型窄很多，asia-east1 不支援，
+# 獨立設定避免受限於 Firestore/embedding 共用的 GOOGLE_CLOUD_LOCATION。
+GEMINI_CLASSIFIER_LOCATION = os.environ.get("MNEMOSYNE_GEMINI_CLASSIFIER_LOCATION", "us-central1")
 
 EMBEDDING_MODEL = "text-multilingual-embedding-002"
 GATE_CLASSIFIER_MODEL = "gemini-2.5-flash"

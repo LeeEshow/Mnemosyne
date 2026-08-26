@@ -42,7 +42,7 @@ class GeminiGateClassifier:
         self._client = genai.Client(
             vertexai=True,
             project=config.GOOGLE_CLOUD_PROJECT_ID,
-            location=config.GOOGLE_CLOUD_LOCATION,
+            location=config.GEMINI_CLASSIFIER_LOCATION,
         )
 
     async def classify(self, new_memory: Memory, candidates: tuple[Memory, ...]) -> GateVerdict:
