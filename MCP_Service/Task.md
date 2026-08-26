@@ -106,7 +106,10 @@ MCP_Service/
 > 全部修正已用假物件驗證（含 SUPERSEDE 正確套用/退回 merged 內容、embedding 確實用合併後文字重算、ValueError 確實被包成 ToolError 且訊息保留、`_merge` 精確命中正確覆寫為 1.0、純空白 domain 在打到 Firestore 前就被擋下）。**未採納**：`_DomainDescriptionCache` 加鎖（報告本身標註優先度低、不影響正確性）；合併三處 domain+global 的 `asyncio.gather` 樣板（報告本身評估後不建議）。**`Domain.describe` → `description` 改名**（報告中另一項 Warning）經 PM 確認後採納，見上方 2.1 節新增項目。
 
 ### 2.5 重新部署與整合測試
-- [ ] 上述程式碼變更完成後（含 2.2 的 domain 遷移腳本先執行一次），`git push` → GCE `git pull` → `systemctl restart mnemosyne`（部署基礎設施已就緒，見上方說明，只需重新部署，不需重建）
+- [x] 上述程式碼變更完成後（含 2.2 的 domain 遷移腳本先執行一次），`git push` → GCE `git pull` → `systemctl restart mnemosyne`（部署基礎設施已就緒，見上方說明，只需重新部署，不需重建）
+
+> 首次真實部署疊了五個環境/函式庫層級的問題（跟程式碼邏輯無關），逐一排查後全部解決：`google-api-core==2.35.0` regression 導致 Firestore 查詢全面 400（鎖版 2.34.0）、GCE VM access scope 與 IAM 角色是獨立限制（補上 `cloud-platform` scope）、跨專案需明確指定 `firebase_admin` 的 `projectId`（見 2.2 節）、MCP SDK `sse_app` 預設 DNS Rebinding 防護擋掉 Cloud Run 代理轉發的請求（新增 `MNEMOSYNE_DISABLE_DNS_REBINDING_PROTECTION`/`MNEMOSYNE_ALLOWED_HOSTS` 環境變數）、`fintarck-proxy` 的 `nginx.conf` 缺少 `/mnemosyne/` 分流且 `proxy_pass` 需補斜線去除路徑前綴。排查細節與各問題的診斷方式記錄於 `CLAUDE.md`「Deployment gotchas」章節，不重複寫在這裡。連線驗證：`curl .../mnemosyne/sse?key=<KEY>` 已確認回 `200`。
+
 - [ ] 整合測試：跨 domain 隔離、`save_memory` 未註冊 domain 回傳 `requires_registration`、`search_memories`/`load_pinned_memories` 未註冊 domain 觸發 `DomainNotRegisteredError`（確認 MCP Client 收到 `isError=True`）、`register_domain` 人工確認流程、正規化去重（大小寫/空白）、寫入閘門三種結果（重複/全新/衝突）、`CONFLICT_DETECTED` 觸發後 AI 是否確實暫停詢問使用者、標籤交集能否抓到低相似度但主題相關的衝突案例（例如：喜好類陳述的修正）、既有資料遷移後可正常存取（含 `"global"` seed 是否生效）、`list_tools` 快取是否確實降低 Firestore 讀取次數
 
 ### 2.6 CI/CD 自動化（延後，不影響上線）
