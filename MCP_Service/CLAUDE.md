@@ -151,9 +151,21 @@ Fix: set `MNEMOSYNE_DISABLE_DNS_REBINDING_PROTECTION=true` in `.env` (safe here 
 already gates access), or `MNEMOSYNE_ALLOWED_HOSTS=<comma-separated hosts>` to keep the protection but
 allowlist the proxy's hostname. Both are read in `interface/mcp_server.py`'s `_get_transport_security()`.
 
-**Nginx path routing for `/mnemosyne/`**: the backend's real routes are `/sse` (GET, opens the SSE stream)
-and `/messages/` (POST) — not `/mcp`, despite what the connection URL in the Proposal doc implies. The
-`location /mnemosyne/` block's `proxy_pass` **must** end with a trailing slash
+**MCP transport: use `streamable_http_app()`, not `sse_app()`.** The classic SSE transport (`sse_app()`,
+two endpoints: GET `/sse` to open the stream + POST `/messages/?session_id=...` for follow-up messages)
+breaks behind a path-prefixed reverse proxy: the server emits the POST endpoint as a path relative to its
+own mount root, which the client resolves relative to the *origin*, not to `/mnemosyne/` — so the POST
+lands on Nginx's catch-all `location /` (the NoCode backend) instead of us, and NoCode's app returns `405`
+for a path it doesn't recognize. Modern MCP clients (Claude Desktop's connector UI) default to expecting
+the newer Streamable HTTP transport anyway and treat an unexpected `405` from an SSE-only server as "the
+server wants auth," which is a red herring that wastes time debugging OAuth/key settings that were never
+the problem. `streamable_http_app()` uses a single endpoint (`/mcp` by default) for both directions, has no
+relative-URL redirect step, and takes the same `transport_security` kwarg as `sse_app()` did — swap one
+for the other in the final `app = key_auth_middleware.KeyAuthMiddleware(mcp_server.streamable_http_app(...))`
+assembly, nothing else changes.
+
+**Nginx path routing for `/mnemosyne/`**: the backend's real route is `/mcp` (both GET and POST, Streamable
+HTTP transport — see above). The `location /mnemosyne/` block's `proxy_pass` **must** end with a trailing slash
 (`proxy_pass http://<GCE_IP>:8001/;`) so Nginx strips the `/mnemosyne/` prefix before forwarding —
 without it the backend receives `/mnemosyne/sse` verbatim and 404s. Don't copy the WebSocket-style
 `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";` pair into this block

@@ -312,12 +312,12 @@ def _get_transport_security() -> TransportSecuritySettings | None:
 
 
 security_settings = _get_transport_security()
-sse_app_kwargs = {}
+streamable_http_app_kwargs = {}
 if security_settings is not None:
-    sse_app_kwargs["transport_security"] = security_settings
+    streamable_http_app_kwargs["transport_security"] = security_settings
 
 app = key_auth_middleware.KeyAuthMiddleware(
-    mcp_server.sse_app(**sse_app_kwargs),
+    mcp_server.streamable_http_app(**streamable_http_app_kwargs),
     expected_key=os.environ.get("MNEMOSYNE_MCP_KEY"),
 )
 
