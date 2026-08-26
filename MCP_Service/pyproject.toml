@@ -7,6 +7,9 @@ dependencies = [
     "fastapi==0.141.1",
     "uvicorn[standard]==0.52.4",
     "firebase-admin==7.5.0",
+    # 明確鎖版本：2.35.0 有 regression（把預設資料庫 "(default)" 誤編碼進 gRPC 請求，
+    # 導致 Firestore 查詢一律回 400 Invalid database id），已從 PyPI 下架，鎖住避免重裝時再抓到。
+    "google-api-core==2.34.0",
     "mcp==2.1.0",
     "google-genai==2.19.0",
     "pydantic==2.13.4",
