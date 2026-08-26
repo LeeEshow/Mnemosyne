@@ -126,7 +126,7 @@ MCP_Service/
 
 ### 2.6 CI/CD 自動化（延後，不影響上線）
 - [x] 比照 NoCode_Project `deploy-python-backend.yml` 新增 `.github/workflows/deploy-mnemosyne.yml`：偵測 `MCP_Service/**` 變更 → SSH 進 GCE → `git pull` → `pip install -e .` → `systemctl restart mnemosyne`
-- [ ] **待 PM 手動設定**：GitHub repo `LeeEshow/Mnemosyne` 目前沒有 `GCE_HOST`/`GCE_USER`/`GCE_SSH_KEY` 這三個 Secrets（跟 NoCode_Project 是不同 repo，Secrets 不會共用，需另外新增）。NoCode_Project 的 workflow 已經用同一組值連到同一台主機、同一個使用者，直接把 NoCode_Project repo settings 裡這三個 Secrets 的值複製過來即可，不用重新產生 SSH 金鑰。設定路徑：Mnemosyne repo → Settings → Secrets and variables → Actions → New repository secret。
+- [x] `LeeEshow/Mnemosyne` repo 已設定 `GCE_HOST`/`GCE_USER`/`GCE_SSH_KEY` 三個 Secrets。因 GitHub Secret 無法讀出既有值，改為專為 Mnemosyne 另外產生一把新的部署金鑰（`github-actions-mnemosyne`），公鑰以「附加」方式加進 GCE instance metadata 的 `ssh-keys`（過程中一度誤用 `--metadata-from-file` 整個覆蓋掉既有的 `ssh-keys` metadata、清空了 NoCode_Project 的 `github-actions` 部署金鑰，已從 Cloud Shell `.bash_history` 找回原始公鑰內容復原，兩把金鑰現在並存，NoCode_Project 部署不受影響）。`workflow_dispatch` 手動觸發一次驗證成功（`git pull` → 安裝依賴 → 重啟服務 → 健康檢查全部通過，25 秒完成）。
 
 ---
 
