@@ -21,6 +21,55 @@
 
 ---
 
+## Phase 2.6：Token 消耗優化
+
+> 設計依據與完整分析見 [`../Docs/Token_Optimization.md`](../Docs/Token_Optimization.md)（含三輪 Claude × agy 架構收斂過程）。
+> 目標：schema 從 ~2,300 tokens/turn 降至 ~1,000 tokens/turn，10-turn session 總消耗減少約 86%。
+> **核心架構決策**：雙保險設計（Belt and Suspenders）——Server `instructions` 承載完整全域規則，Tool description 保留 1 行精簡 guardrail，確保不支援 instructions 的 client（如部分 Gemini 整合）仍有最低安全保障。
+
+### [P0] 移除動態 Domain 注入 → 解鎖 Prompt Cache
+
+- [x] 刪除 `mcp_server.py` 中的 `_DomainDescriptionCache` class、`_domain_description_cache` 實例、`_render_domain_list()`、`_with_dynamic_domain_description()`、`_DOMAIN_PARAM_TOOL_NAMES`
+- [x] `_MnemosyneMCPServer` subclass 整體移除，直接使用 `MCPServer("mnemosyne", instructions=_INSTRUCTIONS)`
+- [x] `config.py`：`DOMAIN_LIST_CACHE_TTL_SECONDS` 保留作歷史紀錄
+
+**驗收**：連續兩次 `list_tools` 呼叫回傳的 schema 位元完全一致，Prompt Cache 可正常命中。
+
+### [P0] 配置 Server `instructions` + Schema 英文化 + 清除跨工具描述污染
+
+> 三項合為一個任務，因為都在同一批檔案（`mcp_server.py`、`tool_schemas.py`）上進行，拆開執行會導致中間狀態語意不一致。
+
+- [x] `mcp_server.py`：`_INSTRUCTIONS` 字串傳入 `MCPServer` constructor，涵蓋 CONFLICT / DOMAIN REGISTRATION / SEARCH / LOAD_PINNED 四條規則
+- [x] `mcp_server.py` 各工具 description 全面改寫為精煉英文，`save_memory` 與 `register_domain` 保留 1 行 guardrail
+- [x] `tool_schemas.py` 所有 `Field(description=...)` 改為精煉英文，清除跨工具描述污染（`SearchMemoriesDomain`、`LoadPinnedMemoriesDomain` 移除 `requires_registration` 流程說明；`SaveMemoryTags` 移除例句）
+
+**驗收**：用英文 query 呼叫工具正常運作；用 Gemini client 連線時，收到 `conflict_detected` 後 AI 行為正確（停下詢問使用者）；schema 大小 ≤ 1,100 tokens。
+
+### [P1] 整併 `pin_memory` / `unpin_memory`
+
+- [x] `mcp_server.py`：`pin_memory` handler 接受 `pinned: bool = True` 參數，`True` 時 pin，`False` 時 unpin
+- [x] 刪除 `unpin_memory` handler 及 `UnpinMemoryUseCase` 注入（`_Dependencies` 與 `_dependencies()`）
+- [x] `tool_schemas.py`：新增 `PinMemoryPinned` 型別；`UnpinMemoryUseCase` class 保留在 `application/pin_memory_use_case.py`，`PinMemoryUseCase.execute()` 改為接受 `pinned: bool = True` kwarg
+
+**驗收**：`pin_memory(doc_id="...", pinned=False)` 成功解除釘選；`list_tools` 回傳工具數量為 7（原 8 個）。
+
+### [P1] Response Payload 瘦身
+
+- [x] `tool_schemas.py`：`MemoryView` 移除 `importance_score: int` 欄位
+- [x] `mcp_server.py`：`_to_memory_view()` 移除 `importance_score=memory.importance_score`
+- [x] `mcp_server.py`：`save_memory` handler 改用 `model.model_dump(exclude_none=True)` 序列化，排除 `null` 欄位
+
+**驗收**：`save_memory` 成功回傳的 JSON 只含 `decision` 與 `doc_id`，無 null 欄位；`MemoryView` 不含 `importance_score`。
+
+### [P2] 搜尋預設 limit 調整
+
+- [x] `config.py`：`SEARCH_MEMORIES_DEFAULT_LIMIT = 2`（從 3 改為 2）
+- [x] `mcp_server.py`：`search_memories` handler 預設 `limit=2`；`tool_schemas.py`：`SearchMemoriesLimit` Field default 改為 2
+
+**驗收**：`search_memories` 不帶 `limit` 參數時預設回傳 2 筆；仍可透過明確傳入 `limit=3` 覆蓋。
+
+---
+
 ## Phase 3：記憶自動精煉
 
 > ⚠️ **待確認事項**：AI 在對話中如何判斷「值得存」的時機，仍是未經實測驗證的啟發式規則，需實際觀察並調整 Tool Description 措辭。

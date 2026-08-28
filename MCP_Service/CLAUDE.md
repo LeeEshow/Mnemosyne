@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Mnemosyne MCP Server — a Python/FastAPI-based MCP (Model Context Protocol) server that gives AI assistants
 a long-term memory layer backed by Google Cloud Firestore (vector search) and Gemini (embeddings +
 write-time judgment, via a personal Google AI Studio subscription — see "Gemini API" section below for why
-this isn't plain Vertex AI). It exposes 8 MCP tools (`save_memory`, `search_memories`, `forget_memory`,
-`pin_memory`, `unpin_memory`, `load_pinned_memories`, `list_domains`, `register_domain`).
+this isn't plain Vertex AI). It exposes 7 MCP tools (`save_memory`, `search_memories`, `forget_memory`,
+`pin_memory`, `load_pinned_memories`, `list_domains`, `register_domain`).
 
 The authoritative design spec is `../Docs/Mnemosyne_MCP_Proposal.md` (one level up, outside this directory).
 It is actively maintained as part of a broader project and should be treated as read-only reference from
@@ -90,7 +90,7 @@ MCP_Service/
 │   ├── vertex_embedding_provider.py
 │   └── gemini_gate_classifier.py
 └── interface/                   # MCP/FastAPI entry point, I/O translation only
-    ├── mcp_server.py             # tool registration, Streamable HTTP transport, dynamic domain description injection
+    ├── mcp_server.py             # tool registration, Streamable HTTP transport
     ├── key_auth_middleware.py    # MNEMOSYNE_MCP_KEY check
     └── tool_schemas.py           # the only layer where Pydantic models live
 ```
@@ -117,11 +117,8 @@ failure shapes by design: `save_memory` returns a structured `decision="requires
 `SaveMemoryDecision` in `application/save_memory_use_case.py`), while `search_memories`/
 `load_pinned_memories` `raise DomainNotRegisteredError` (caught and converted to `ToolError` at the
 interface layer, per the gotcha above) — because those two only return a memory list and have no
-"decision" field to carry state in. `interface/mcp_server.py` also overrides `list_tools()` (via the
-`_MnemosyneMCPServer` subclass) to inject the live registered-domain list into the `domain` parameter's
-description, cached with a TTL (`config.DOMAIN_LIST_CACHE_TTL_SECONDS`) — it deep-copies the schema dict
-before mutating it, because `ToolManager` reuses the same schema dict object across calls and mutating it
-in place would make the injected text accumulate on every `list_tools` call.
+"decision" field to carry state in. `domain` parameter descriptions are static strings; the AI discovers
+the registered domain list from error responses (which include the list) rather than dynamic injection.
 
 **Write gate / causal memory model** (`domain/write_gate_policy.py` +
 `application/save_memory_use_case.py`). Each memory is `premise` (因) + `conclusion` (果), not a single
