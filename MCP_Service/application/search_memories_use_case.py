@@ -101,7 +101,8 @@ class SearchMemoriesUseCase:
         values = list(candidates.values())
         if type_filter is None:
             return values
-        return [scored for scored in values if scored.memory.type == type_filter]
+        normalized_filter = type_filter.strip().lower()
+        return [scored for scored in values if scored.memory.type.strip().lower() == normalized_filter]
 
     def _rank_top(self, candidates: list[ScoredMemory], limit: int) -> list[ScoredMemory]:
         parameters = ScoringParameters(_SCORING_WEIGHTS, config.DECAY_LAMBDA, config.ACCESS_FREQUENCY_LOG_CAP)

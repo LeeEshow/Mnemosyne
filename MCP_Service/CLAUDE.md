@@ -137,6 +137,49 @@ which one (if any) it matched via `matched_memory_id` plus `NOOP`/`UPDATE`/`SUPE
 `merged_conclusion` (a re-summarization, not concatenation) and recompute the embedding from the merged
 text before writing — copy `_apply_update`'s shape if you touch this.
 
+**`UPDATE`/`SUPERSEDE` must not silently drop fields the LLM verdict doesn't carry.** The verdict only
+ever returns `merged_title`/`merged_premise`/`merged_conclusion` — everything else on the surviving memory
+(`tags`, `is_pinned`, `access_count`) has to be carried forward explicitly by `_apply_update`/
+`_apply_supersede`, or it reverts to a default and the loss is silent (no error, no log). Two shipped
+instances of this (Phase 2.7): (1) `tags` — `_apply_update` overwrites in place and previously ignored
+this call's new `tags` entirely, while `_apply_supersede` builds a brand-new document and previously
+ignored the *old* memory's `tags` entirely (opposite failure, same root cause). Fixed by a deterministic
+union (`tuple(sorted(set(old) | set(new)))`, not LLM-judged — tags are a safety net for tag-intersection
+conflict detection and exact-tag search, so over-keeping is the safe direction) via the `_merge_tags()`
+helper. (2) `is_pinned`/`access_count` — `_apply_supersede` builds the new `Memory` via `_build_memory()`,
+which has no way to know about the old document, so both silently reset to their dataclass defaults
+(`is_pinned=False`, `access_count=None`≈0) unless explicitly copied from `candidate.memory` with
+`dataclasses.replace()` after `_build_memory()` runs. A pinned or frequently-accessed memory that gets
+SUPERSEDEd would otherwise lose that state with no error. Because of this, `_apply_verdict` passes the
+whole `GateCandidate` (not just `matched.memory.id`) down to `_apply_update`/`_apply_supersede` — both need
+the full old `Memory`, not just its ID. `MemoryRepository.overwrite_content()` takes a `MemoryContentUpdate`
+value object (`domain/models.py`) rather than 5 positional params, since adding `tags` to the old signature
+would have pushed it past the team's 4-parameter limit. `SaveMemoryResult`/`SaveMemoryResponse` also carry
+the resulting `memory`/`merged_memory` (a `MemoryView`) for `ADD`/`UPDATE`/`SUPERSEDE`/`NOOP`, so a caller
+can see what a merge actually produced without a follow-up `search_memories` call.
+
+**`premise`/`conclusion` length is enforced in `interface/mcp_server.py`, not via Pydantic
+`Field(max_length=...)`.** A `max_length` constraint on the schema gives a vague overflow error with no
+character count, and risks some MCP clients validating the JSON Schema `maxLength` as UTF-8 byte count
+client-side (which would reject far below 500 for CJK text) before the request ever reaches the server.
+`save_memory`'s handler instead calls `_ensure_within_max_length()` — plain `len()` (Unicode codepoints,
+so CJK counts as 1 char each) against `config.SAVE_MEMORY_TEXT_MAX_LENGTH` — and raises `ToolError` with
+the actual/limit counts. Don't reintroduce `max_length` on those two schema fields.
+
+**`type` is normalized (`.strip().lower()`) at write time** in `SaveMemoryUseCase.execute()`, and matched
+case-insensitively (both sides normalized) in `SearchMemoriesUseCase._apply_type_filter`, so old
+mixed-case documents stay findable. This is normalization only, not an enum — enumerating the historically
+used `type` values first is a deliberately deferred follow-up, not attempted here.
+
+**Tool response payloads are not actually null-stripped, despite Phase 2.6's changelog entry claiming
+otherwise.** `save_memory`'s handler returns the `SaveMemoryResponse` Pydantic model directly; the MCP
+SDK's own serialization (`func_metadata.py`: `validated.model_dump(mode="json", by_alias=True)` for
+structured content, `pydantic_core.to_json(...)` for the text content) does not pass `exclude_none=True`
+anywhere in this vendored SDK version, so `None` fields (`registered_domains`, `conflicting_memory`,
+`merged_memory`) are serialized as explicit `null`s today. Don't assume the "no null fields" behavior
+Task.md's Phase 2.6 section describes is actually in place — verify against `interface/mcp_server.py` and
+the SDK before relying on it.
+
 **Two decision enums, intentionally split.** `WriteGateDecision` (`domain/write_gate_policy.py`) is the
 internal write-gate classification only. `SaveMemoryDecision` (`application/save_memory_use_case.py`) is
 the outward-facing result and adds `REQUIRES_REGISTRATION`/`CONFLICT_DETECTED` with deliberately

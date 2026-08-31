@@ -91,6 +91,15 @@ def _to_domain_view(domain: Domain) -> tool_schemas.DomainView:
     return tool_schemas.DomainView(name=domain.name, description=domain.description, created_at=domain.created_at)
 
 
+def _ensure_within_max_length(field_name: str, value: str) -> None:
+    length = len(value)
+    if length <= config.SAVE_MEMORY_TEXT_MAX_LENGTH:
+        return
+    raise ToolError(
+        f"{field_name} 目前 {length} 字，超過 {config.SAVE_MEMORY_TEXT_MAX_LENGTH} 字上限，請精簡內容"
+    )
+
+
 @mcp_server.tool(
     description="Store long-term memory. If result is 'conflict_detected' or 'requires_registration', pause and confirm with user before proceeding."
 )
@@ -103,6 +112,8 @@ async def save_memory(
     tags: tool_schemas.SaveMemoryTags = None,
     importance_score: tool_schemas.SaveMemoryImportanceScore = None,
 ) -> tool_schemas.SaveMemoryResponse:
+    _ensure_within_max_length("premise", premise)
+    _ensure_within_max_length("conclusion", conclusion)
     request = SaveMemoryRequest(
         domain=domain,
         title=title,
@@ -121,6 +132,7 @@ async def save_memory(
         doc_id=result.memory_id,
         registered_domains=list(result.registered_domains) if result.registered_domains else None,
         conflicting_memory=_to_memory_view(result.conflicting_memory) if result.conflicting_memory else None,
+        merged_memory=_to_memory_view(result.memory) if result.memory else None,
     )
 
 

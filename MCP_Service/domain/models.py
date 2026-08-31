@@ -34,6 +34,15 @@ class ScoredMemory:
 
 
 @dataclass(frozen=True)
+class MemoryContentUpdate:
+    title: str
+    premise: str
+    conclusion: str
+    tags: tuple[str, ...] | None
+    embedding: tuple[float, ...]
+
+
+@dataclass(frozen=True)
 class MemoryStatusFilter:
     include_superseded: bool = False
     include_archived: bool = False

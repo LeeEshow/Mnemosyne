@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from domain.models import Memory, MemoryStatus, MemoryStatusFilter, ScoredMemory
+from domain.models import Memory, MemoryContentUpdate, MemoryStatus, MemoryStatusFilter, ScoredMemory
 
 
 class MemoryRepository(Protocol):
@@ -16,9 +16,7 @@ class MemoryRepository(Protocol):
 
     async def find_pinned(self, domain: str) -> list[Memory]: ...
 
-    async def overwrite_content(
-        self, memory_id: str, title: str, premise: str, conclusion: str, embedding: tuple[float, ...]
-    ) -> None: ...
+    async def overwrite_content(self, memory_id: str, update: MemoryContentUpdate) -> None: ...
 
     async def mark_superseded(self, memory_id: str, superseded_by: str) -> None: ...
 

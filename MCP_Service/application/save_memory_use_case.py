@@ -6,7 +6,7 @@ from enum import Enum
 import config
 from application.domain_validation import ensure_domain_registered
 from domain.exceptions import DomainNotRegisteredError
-from domain.models import Memory, MemoryStatusFilter
+from domain.models import Memory, MemoryContentUpdate, MemoryStatusFilter
 from domain.ports.domain_repository import DomainRepository
 from domain.ports.embedding_provider import EmbeddingProvider
 from domain.ports.gate_classifier import GateClassifier
@@ -46,6 +46,7 @@ class SaveMemoryResult:
     memory_id: str | None
     registered_domains: tuple[str, ...] | None = None
     conflicting_memory: Memory | None = None
+    memory: Memory | None = None
 
 
 class SaveMemoryUseCase:
@@ -68,7 +69,7 @@ class SaveMemoryUseCase:
             return SaveMemoryResult(
                 SaveMemoryDecision.REQUIRES_REGISTRATION, None, error.registered_domains
             )
-        request = replace(request, domain=domain)
+        request = replace(request, domain=domain, type=request.type.strip().lower())
         embedding = await self._embedding_provider.embed(
             _embeddable_text(request.title, request.premise, request.conclusion)
         )
@@ -112,13 +113,13 @@ class SaveMemoryUseCase:
 
     async def _apply_noop(self, candidate: GateCandidate) -> SaveMemoryResult:
         await self._repository.record_access(candidate.memory.id)
-        return SaveMemoryResult(SaveMemoryDecision.NOOP, candidate.memory.id)
+        return SaveMemoryResult(SaveMemoryDecision.NOOP, candidate.memory.id, memory=candidate.memory)
 
     async def _apply_add(
         self, request: SaveMemoryRequest, embedding: tuple[float, ...]
     ) -> SaveMemoryResult:
         saved = await self._repository.save(self._build_memory(request, embedding))
-        return SaveMemoryResult(SaveMemoryDecision.ADD, saved.id)
+        return SaveMemoryResult(SaveMemoryDecision.ADD, saved.id, memory=saved)
 
     async def _apply_verdict(
         self,
@@ -133,9 +134,9 @@ class SaveMemoryUseCase:
         if verdict.decision == WriteGateDecision.NOOP:
             return await self._apply_noop(matched)
         if verdict.decision == WriteGateDecision.UPDATE:
-            return await self._apply_update(verdict, matched)
+            return await self._apply_update(verdict, matched, request)
         if verdict.decision == WriteGateDecision.SUPERSEDE:
-            return await self._apply_supersede(verdict, request, matched.memory.id)
+            return await self._apply_supersede(verdict, request, matched)
         return SaveMemoryResult(SaveMemoryDecision.CONFLICT_DETECTED, None, conflicting_memory=matched.memory)
 
     def _find_candidate(self, candidates: tuple[GateCandidate, ...], memory_id: str | None) -> GateCandidate:
@@ -144,26 +145,41 @@ class SaveMemoryUseCase:
                 return candidate
         raise ValueError(f"寫入閘門判定回傳的 matched_memory_id={memory_id!r} 不在候選名單中")
 
-    async def _apply_update(self, verdict: GateVerdict, candidate: GateCandidate) -> SaveMemoryResult:
+    async def _apply_update(
+        self, verdict: GateVerdict, candidate: GateCandidate, request: SaveMemoryRequest
+    ) -> SaveMemoryResult:
         memory = candidate.memory
         title = verdict.merged_title or memory.title
         premise = verdict.merged_premise or memory.premise
         conclusion = verdict.merged_conclusion or memory.conclusion
+        tags = _merge_tags(memory.tags, request.tags)
         embedding = await self._embedding_provider.embed(_embeddable_text(title, premise, conclusion))
-        await self._repository.overwrite_content(memory.id, title, premise, conclusion, embedding)
-        return SaveMemoryResult(SaveMemoryDecision.UPDATE, memory.id)
+        await self._repository.overwrite_content(
+            memory.id, MemoryContentUpdate(title, premise, conclusion, tags, embedding)
+        )
+        updated_memory = replace(
+            memory, title=title, premise=premise, conclusion=conclusion, tags=tags, embedding=embedding
+        )
+        return SaveMemoryResult(SaveMemoryDecision.UPDATE, memory.id, memory=updated_memory)
 
     async def _apply_supersede(
-        self, verdict: GateVerdict, request: SaveMemoryRequest, superseded_id: str
+        self, verdict: GateVerdict, request: SaveMemoryRequest, candidate: GateCandidate
     ) -> SaveMemoryResult:
+        old_memory = candidate.memory
         title = verdict.merged_title or request.title
         premise = verdict.merged_premise or request.premise
         conclusion = verdict.merged_conclusion or request.conclusion
+        tags = _merge_tags(old_memory.tags, request.tags)
         embedding = await self._embedding_provider.embed(_embeddable_text(title, premise, conclusion))
-        merged_request = replace(request, title=title, premise=premise, conclusion=conclusion)
-        saved = await self._repository.save(self._build_memory(merged_request, embedding))
-        await self._repository.mark_superseded(superseded_id, saved.id)
-        return SaveMemoryResult(SaveMemoryDecision.SUPERSEDE, saved.id)
+        merged_request = replace(request, title=title, premise=premise, conclusion=conclusion, tags=tags)
+        new_memory = replace(
+            self._build_memory(merged_request, embedding),
+            is_pinned=old_memory.is_pinned,
+            access_count=old_memory.access_count,
+        )
+        saved = await self._repository.save(new_memory)
+        await self._repository.mark_superseded(old_memory.id, saved.id)
+        return SaveMemoryResult(SaveMemoryDecision.SUPERSEDE, saved.id, memory=saved)
 
     def _build_memory(self, request: SaveMemoryRequest, embedding: tuple[float, ...]) -> Memory:
         return Memory(
@@ -181,3 +197,7 @@ class SaveMemoryUseCase:
 
 def _embeddable_text(title: str, premise: str, conclusion: str) -> str:
     return f"{title}\n{premise}\n{conclusion}"
+
+
+def _merge_tags(old_tags: tuple[str, ...] | None, new_tags: tuple[str, ...] | None) -> tuple[str, ...]:
+    return tuple(sorted(set(old_tags or ()) | set(new_tags or ())))

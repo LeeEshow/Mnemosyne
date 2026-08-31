@@ -8,7 +8,7 @@ from google.cloud.firestore_v1.document import DocumentSnapshot
 from google.cloud.firestore_v1.vector import Vector
 
 import config
-from domain.models import Memory, MemoryStatus, MemoryStatusFilter, ScoredMemory
+from domain.models import Memory, MemoryContentUpdate, MemoryStatus, MemoryStatusFilter, ScoredMemory
 from infrastructure import firebase_app
 
 _DISTANCE_FIELD = "_vector_distance"
@@ -52,12 +52,16 @@ class FirestoreMemoryRepository:
         snapshots = await asyncio.to_thread(self._query_pinned_by_domain, domain)
         return [self._to_memory(snapshot) for snapshot in snapshots]
 
-    async def overwrite_content(
-        self, memory_id: str, title: str, premise: str, conclusion: str, embedding: tuple[float, ...]
-    ) -> None:
+    async def overwrite_content(self, memory_id: str, update: MemoryContentUpdate) -> None:
         await self._update(
             memory_id,
-            {"title": title, "premise": premise, "conclusion": conclusion, "embedding": Vector(embedding)},
+            {
+                "title": update.title,
+                "premise": update.premise,
+                "conclusion": update.conclusion,
+                "tags": list(update.tags) if update.tags else [],
+                "embedding": Vector(update.embedding),
+            },
         )
 
     async def mark_superseded(self, memory_id: str, superseded_by: str) -> None:

@@ -18,14 +18,12 @@ SaveMemoryTitle = Annotated[str, Field(description="Short title for quick human 
 SaveMemoryPremise = Annotated[
     str,
     Field(
-        max_length=500,
         description="Context/cause (≤500 chars): the situation or constraint that led to this memory.",
     ),
 ]
 SaveMemoryConclusion = Annotated[
     str,
     Field(
-        max_length=500,
         description="Decision/outcome (≤500 chars): the rule or lesson that will be applied.",
     ),
 ]
@@ -137,6 +135,7 @@ class SaveMemoryResponse(BaseModel):
     doc_id: str | None
     registered_domains: list[str] | None = None
     conflicting_memory: MemoryView | None = None
+    merged_memory: MemoryView | None = None
 
 
 class SearchMemoriesResponse(BaseModel):
