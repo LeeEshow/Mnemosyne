@@ -5,7 +5,7 @@
 
 ---
 
-## 現況總覽（Phase 1 + 2 + 2.6 + 2.7 已完成部署與修復驗證）
+## 現況總覽（Phase 1 + 2 + 2.6 + 2.7 + 2.8 已完成部署與修復驗證）
 
 > 程式碼架構模式（Hexagonal Architecture、目錄結構、三條硬規則）已移至 `CLAUDE.md`「Architecture」章節，不在此重複。
 
@@ -21,26 +21,28 @@
 * **Phase 1（基礎建設）與 Phase 2（因果模型改版）**：完成了 Schema 調整、Domain Registry、寫入閘門重構、部署與整合測試，並透過 Claude Desktop 實際連線驗證。
 * **Phase 2.6（Token 消耗優化）**：移除動態 domain 描述快取注入解鎖 Prompt Cache，整併 `pin_memory`/`unpin_memory` 為單一工具，將 schema 英文化並大幅簡寫以削減 token，完成 response payload 瘦身並調整搜尋預設 limit 至 2。
 * **Phase 2.7（使用回饋問題修復）**：完成了 5 項核心使用回饋問題修復，包含 tags 雙向聯集合併、SUPERSEDE 狀態繼承（is_pinned / access_count）、回傳最終生效記憶預覽、改用手動驗證長度與自訂錯誤（解決 client 端 byte 計算問題）、以及 type 欄位正規化以相容既有資料。
+* **Phase 2.8（儲存機制優化與 Bug 修復）**：完成了 `UPDATE` 儲存機制優化（原地覆寫 + 歷史快照以留存審計軌跡，保持 ID 與時效/重要度穩定）、修復了 `SUPERSEDE` 重要度丟失 Bug，並在 `pin`/`forget` 寫入路徑上加入多代遞迴 ID 解析以防過期 ID 懸空。
 
 ---
 
-## 架構提案（待決策，尚未核准）：`UPDATE` 統一改走 `SUPERSEDE` 的儲存路徑
+## Phase 2.8（已於 2026-08-31 完成並通過覆核驗證）：`UPDATE` 儲存機制調整 + SUPERSEDE 既有 bug 修復
 
-> **狀態**：agy 提出、PM 端評估後認為值得採納的架構提案，**尚未跟你定案，不在 Phase 2.7 的實作範圍內**。列在這裡是為了不遺失這個討論脈絡，決定要不要做、什麼時候做之前不要動工。
+**現況**：`UPDATE`（原地覆寫既有 Firestore 文件，舊 `title`/`premise`/`conclusion` 直接消失，`doc_id`/`created_at`/`importance_score`/`is_pinned`/`access_count` 都不變）與 `SUPERSEDE`（建立全新文件，`doc_id` 改變，舊文件標記 `status="superseded"`，內容保留可查）是兩條不同的儲存路徑。
 
-**現況**：`UPDATE`（原地覆寫既有 Firestore 文件，舊 `title`/`premise`/`conclusion` 直接消失，`doc_id` 不變）與 `SUPERSEDE`（建立全新文件，舊文件標記 `status="superseded"`，內容保留可查）目前是兩條不同的儲存路徑。
+**原始提案為何被否決（agy 覆議發現的三個盲區，皆已對照程式碼驗證屬實）**：
+1. **Stale ID / 懸空參照**：`pin_memory`、`forget_memory` 都是直接對呼叫端傳入的 `memory_id` 操作，沒有查詢該 ID 是否已被 `mark_superseded()` 標記、也不會沿 `superseded_by` 鏈條往後找。若把高頻的 `UPDATE` 也改走「建新 ID、舊 ID 作廢」的模式，AI context 中快取的舊 `doc_id` 會頻繁失效，導致 pin/forget 靜默作用在已作廢的文件上、真正的 active 文件毫無反應。
+2. **時效與重要度倒退**：`_build_memory` 建新文件時一律 `created_at=now()`，會讓「只是修個錯字」的 `UPDATE` 在 recency 衰減排序中被人為刷新排到最前面。
+3. **回溯語意（fallback semantics）不同**：`_apply_update` 在 LLM 未給出合併欄位時回溯「舊記憶內容」，`_apply_supersede` 回溯「新請求內容」，兩者方向相反，統一儲存路徑時必須避免這層應用邏輯被誤合併。
 
-**提案**：把 `UPDATE` 的儲存方式也改成跟 `SUPERSEDE` 一樣——一律建新文件、舊文件標記 superseded，不再有「原地覆寫、舊內容永久消失」的路徑。`decision` 回傳值（`UPDATE` vs `SUPERSEDE`）維持不變，只是持久化機制統一。
+**額外發現（不屬於原提案範圍，但已完成修復的既有 bug）**：
+- **`SUPERSEDE` 的 `importance_score` 退化 bug**：`_apply_supersede` 的 `merged_request` 原先未帶入 `old_memory.importance_score`，導致無明確傳入時會退化為預設值 5。已完成修復，能正確繼承舊值。
 
-**理由**：
-1. **資料安全**：`UPDATE` 目前不可逆——如果 Gemini 合併判斷失誤，舊內容沒有任何辦法救回來。改成建新文件後，所有內容變動都自動留下稽核軌跡，也符合 Proposal 2.5/6.4 章「不做硬刪除、用 `status` + `superseded_by` 保留稽核軌跡」的既有設計哲學（目前的 `UPDATE` 其實是這個原則底下唯一的例外）。
-2. **會讓 Phase 2.7 的修復更簡單**：Phase 2.7 的「tags 合併」與「SUPERSEDE 繼承 pin/access_count」這兩項修復，如果 `UPDATE` 改走跟 `SUPERSEDE` 一樣的路徑，可以共用同一段程式碼，不用在 `_apply_update`、`_apply_supersede` 各寫一次。
-3. **職責分離更乾淨**：「這是什麼類型的變動」（`decision` 語意，仍由 LLM 判斷 UPDATE/SUPERSEDE/CONFLICT_DETECTED）跟「怎麼持久化」（統一走新文件 + 標記 superseded）本來就是兩個不同層次的問題，沒有理由因為前者的判斷不同就一定要用不同的儲存機制。
+**最終實現方案**：
+1. **`UPDATE` 原地覆寫 + 歷史快照**：`UPDATE` 繼續原地覆寫 active 文件（所有屬性與 ID 均不變），但在覆寫前**新增一次寫入**，將舊內容存成 `status="superseded"`、`superseded_by` 指向 active 文件 ID 的歷史快照文件，完美留存審計軌跡，且不破壞 `SUPERSEDE` 的因果鏈與 ID 不可變性。
+2. **修復 SUPERSEDE 的 `importance_score` 繼承缺失**：`_apply_supersede` 建立新 Memory 時正確繼承舊記憶的 `importance_score`。
+3. **`pin_memory`/`forget_memory` 加入遞迴解析**：在操作前呼叫 `resolve_active_memory_id()`，利用 `while` 迴圈與 `visited` 集合循著 `superseded_by` 指針一路解析至真正 active 的文件 ID（解決多代 SUPERSEDE 產生的 stale ID 懸空 Bug）。
+4. **防禦性 Pydantic 一致性修復**：修正 `_build_memory` 中對 `importance_score` 的 falsy Coercion 判斷（改用 `is not None`），以確保若傳入 0 分時不會被誤判重設為預設值 5。
 
-**取捨與待確認**：
-- `UPDATE` 完成後 `doc_id` 會變（現在不變）。如果 AI 之前記住了某個 `doc_id`（例如剛 `pin_memory` 過），這筆記憶被 `UPDATE` 後舊 `doc_id` 就作廢——不過這正是 Phase 2.7 已經要幫 `SUPERSEDE` 處理的「繼承 pin/access_count」邏輯，`UPDATE` 走同一條路等於自動一併解決，不算額外負擔。
-- 長期下來文件數量成長速度會變快（同一個主題被反覆修正 10 次，會變成 10 份文件而非 1 份原地編輯的文件）。以目前個人使用規模，Firestore Spark 免費額度完全吃得下，不是問題。
-
-**若要推進，下一步**：跟 PM 確認是否採納，採納的話請 agy 針對這個新的統一儲存路徑再覆議一次（尤其是 `doc_id` 變動對既有呼叫端行為的影響），再排進實作。
+**驗證方式**：使用驗證腳本測試了多代鏈 `A→B→C→D` 遞迴解析、快照內容保存與重要度繼承邏輯，已全數通過驗證。
 
 ---

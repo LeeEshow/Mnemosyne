@@ -6,7 +6,7 @@ from enum import Enum
 import config
 from application.domain_validation import ensure_domain_registered
 from domain.exceptions import DomainNotRegisteredError
-from domain.models import Memory, MemoryContentUpdate, MemoryStatusFilter
+from domain.models import Memory, MemoryContentUpdate, MemoryStatus, MemoryStatusFilter
 from domain.ports.domain_repository import DomainRepository
 from domain.ports.embedding_provider import EmbeddingProvider
 from domain.ports.gate_classifier import GateClassifier
@@ -154,6 +154,7 @@ class SaveMemoryUseCase:
         conclusion = verdict.merged_conclusion or memory.conclusion
         tags = _merge_tags(memory.tags, request.tags)
         embedding = await self._embedding_provider.embed(_embeddable_text(title, premise, conclusion))
+        await self._archive_pre_update_snapshot(memory)
         await self._repository.overwrite_content(
             memory.id, MemoryContentUpdate(title, premise, conclusion, tags, embedding)
         )
@@ -161,6 +162,10 @@ class SaveMemoryUseCase:
             memory, title=title, premise=premise, conclusion=conclusion, tags=tags, embedding=embedding
         )
         return SaveMemoryResult(SaveMemoryDecision.UPDATE, memory.id, memory=updated_memory)
+
+    async def _archive_pre_update_snapshot(self, memory: Memory) -> None:
+        snapshot = replace(memory, id=None, status=MemoryStatus.SUPERSEDED, superseded_by=memory.id)
+        await self._repository.save(snapshot)
 
     async def _apply_supersede(
         self, verdict: GateVerdict, request: SaveMemoryRequest, candidate: GateCandidate
@@ -170,8 +175,18 @@ class SaveMemoryUseCase:
         premise = verdict.merged_premise or request.premise
         conclusion = verdict.merged_conclusion or request.conclusion
         tags = _merge_tags(old_memory.tags, request.tags)
+        importance_score = (
+            request.importance_score if request.importance_score is not None else old_memory.importance_score
+        )
         embedding = await self._embedding_provider.embed(_embeddable_text(title, premise, conclusion))
-        merged_request = replace(request, title=title, premise=premise, conclusion=conclusion, tags=tags)
+        merged_request = replace(
+            request,
+            title=title,
+            premise=premise,
+            conclusion=conclusion,
+            tags=tags,
+            importance_score=importance_score,
+        )
         new_memory = replace(
             self._build_memory(merged_request, embedding),
             is_pinned=old_memory.is_pinned,
@@ -190,7 +205,9 @@ class SaveMemoryUseCase:
             conclusion=request.conclusion,
             embedding=embedding,
             created_at=datetime.now(timezone.utc),
-            importance_score=request.importance_score or config.DEFAULT_IMPORTANCE_SCORE,
+            importance_score=(
+                request.importance_score if request.importance_score is not None else config.DEFAULT_IMPORTANCE_SCORE
+            ),
             tags=request.tags,
         )
 

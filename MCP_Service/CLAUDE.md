@@ -180,6 +180,52 @@ anywhere in this vendored SDK version, so `None` fields (`registered_domains`, `
 Task.md's Phase 2.6 section describes is actually in place — verify against `interface/mcp_server.py` and
 the SDK before relying on it.
 
+**`UPDATE` overwrites in place but archives a pre-overwrite snapshot first (Phase 2.8).** `_apply_update`
+still mutates the active document in place — `doc_id`/`created_at`/`importance_score`/`is_pinned`/
+`access_count` never change, matching `SUPERSEDE`'s semantics for those fields — but before calling
+`overwrite_content()` it now calls `_archive_pre_update_snapshot(memory)`, which saves a *second* document:
+a copy of the candidate's content as it stood immediately before this overwrite, with `id=None` (new doc),
+`status=SUPERSEDED`, `superseded_by=memory.id` (pointing at the still-active original). This gives `UPDATE`
+an audit trail without adopting `SUPERSEDE`'s forward-pointer/new-`doc_id` model — a full "make `UPDATE` use
+`SUPERSEDE`'s storage path" proposal was evaluated and rejected (see Task.md's Phase 2.8 section) because it
+would flatten `superseded_by`'s causal-chain semantics (Proposal 2.5/6.4) from a chain into a star (every
+snapshot pointing at the same central active ID) and break the invariant that a `SUPERSEDE`-produced `doc_id`'s
+content never changes again. If you touch `_apply_update`, keep the snapshot as the *pre*-overwrite state —
+it must capture `memory` (the candidate as fetched), not the merged title/premise/conclusion being written.
+
+**`SUPERSEDE` inherits `importance_score` from the old memory unless this call explicitly overrides it
+(Phase 2.8 bug fix).** `_apply_supersede` computes
+`importance_score = request.importance_score if request.importance_score is not None else old_memory.importance_score`
+before building the new document — mirroring the existing `is_pinned`/`access_count` inheritance pattern.
+Before this fix, `merged_request` never touched `importance_score`, so it silently fell through to
+`_build_memory`'s `request.importance_score or config.DEFAULT_IMPORTANCE_SCORE` fallback (5) any time the
+caller's `save_memory` call for a SUPERSEDE didn't explicitly pass one — quietly degrading a memory's
+importance on every LLM-triggered correction. Same root cause and shape as the tags/is_pinned/access_count
+bugs documented above: fields the LLM verdict doesn't carry must be threaded through explicitly, or they
+revert to a default with no error.
+
+**`pin_memory`/`forget_memory` resolve a superseded `memory_id` to its current active one before acting
+(Phase 2.8, chain-walk fixed post-review).** Both use cases previously operated directly on the
+caller-supplied `memory_id` with no check — if that ID had since been superseded (by a `SUPERSEDE` write, or
+now also by an `UPDATE`'s pre-overwrite snapshot), the pin/forget silently landed on the archived, dead
+document while the real active memory was untouched. `application/superseded_resolution.py::resolve_active_memory_id()`
+(a plain async function, same shape as `application/domain_validation.py::ensure_domain_registered` — no
+need for a class since it's not an MCP tool) fetches the memory via the new `MemoryRepository.get_by_id()`
+port method and, if its `status == SUPERSEDED`, follows `superseded_by`.
+
+**Must walk the full chain, not just one hop — the first Phase 2.8 implementation shipped a single-hop
+version and it was wrong, caught in post-implementation review.** `mark_superseded()` (called from
+`_apply_supersede`) only ever updates the one document being directly superseded in that call — it never
+revisits earlier ancestors. So a memory superseded twice (`A`'s `superseded_by` set to `B` on the first
+`SUPERSEDE`, then `B` itself superseded to `C` on a second `SUPERSEDE`) leaves `A.superseded_by` stale at
+`"B"`, and `B` is no longer active. A caller still holding the original `"A"` id — the exact stale-ID
+scenario this function exists to fix — would have one-hop resolution land back on superseded `B` instead of
+active `C`. The same applies to a `superseded`-snapshot-then-`SUPERSEDE` combination (an `UPDATE` snapshot
+whose target subsequently gets superseded). `resolve_active_memory_id()` therefore loops, following
+`superseded_by` until it reaches a document that isn't `SUPERSEDED` (or has no `superseded_by`), with a
+`visited` set to bail out instead of infinite-looping if a cycle ever exists in the data. `PinMemoryUseCase.execute()`
+and `ForgetMemoryUseCase.execute()` both call this before touching the repository.
+
 **Two decision enums, intentionally split.** `WriteGateDecision` (`domain/write_gate_policy.py`) is the
 internal write-gate classification only. `SaveMemoryDecision` (`application/save_memory_use_case.py`) is
 the outward-facing result and adds `REQUIRES_REGISTRATION`/`CONFLICT_DETECTED` with deliberately

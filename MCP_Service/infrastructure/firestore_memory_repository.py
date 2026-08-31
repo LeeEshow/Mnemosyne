@@ -23,6 +23,10 @@ class FirestoreMemoryRepository:
         _, doc_ref = await asyncio.to_thread(self._collection.add, self._to_document(memory))
         return replace(memory, id=doc_ref.id)
 
+    async def get_by_id(self, memory_id: str) -> Memory | None:
+        snapshot = await asyncio.to_thread(self._collection.document(memory_id).get)
+        return self._to_memory(snapshot) if snapshot.exists else None
+
     async def find_nearest(
         self, domain: str, embedding: tuple[float, ...], limit: int, status_filter: MemoryStatusFilter
     ) -> list[ScoredMemory]:
