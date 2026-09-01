@@ -1,103 +1,106 @@
 # Mnemosyne — 跨領域 AI 長期記憶體
 
-個人專屬的長期記憶層，透過 Model Context Protocol (MCP) 讓不同 AI 助理（Cursor、Claude Desktop、理財網頁等）共用同一份記憶庫，解決「對話結束即失憶」的問題。以領域（`domain`）區隔不同情境的記憶，同時保留跨領域共享的全域偏好設定。
+> *"I sometimes find, and I am sure you know the feeling, that I simply have too many thoughts and memories crammed into my mind."* —— Albus Dumbledore
+
+哈利波特的世界裡，鄧不利多把過多、過雜的思緒抽成一縷縷銀白絲線，存進儲思盆（Pensieve）——不是為了丟掉，而是為了在需要的時候，重新沉進去，看清楚事情的來龍去脈。儲思盆存的從來不是隨手的隻字片語，而是已經被抽離、被萃取過的**思緒本身**：一段思考是怎麼從某個處境（因）走到某個結論（果）的完整脈絡。
+
+Mnemosyne（記憶女神，繆思九姊妹之母）想做的是同一件事，只是儲思盆這頭換成 AI。每一次跟 AI 助理的對話，本質上都是一次思緒的產生——但對話一結束，思緒就跟著視窗一起消失，下次換一個助理、換一個場景，AI 又得從零開始重新認識你。這個專案讓 Cursor、Claude Desktop、理財網頁等不同 AI 助理，都能沉進同一座儲思盆，共用同一份被萃取過的記憶，解決「對話結束即失憶」的問題。
 
 ---
 
-## 核心設計
+## 設計構想：把「儲思盆」的規則寫成系統
 
-- **高訊雜比**：只存 AI 精煉後的因果結構（`premise`/`conclusion`，各限 500 字），不存原始逐字對話
-- **因果記憶模型**：每筆記憶是「因為什麼、所以得到什麼結論」，新舊記憶矛盾或修正時走寫入閘門判定，而非單向累積事實清單
-- **寫入閘門（Write Gate）**：新記憶寫入前，雙軌候選查詢（向量最近鄰 + 標籤交集）+ LLM 判定 `NOOP`/`UPDATE`/`SUPERSEDE`/`CONFLICT_DETECTED`/`ADD` 五選一，避免重複與衝突資訊持續累積；偵測到邏輯矛盾時**強制**暫停詢問使用者，不可由 AI 自行覆蓋
-- **Domain Registry**：`domain` 是自由的工具參數（不綁定連線層級），但新增 domain 需經人工確認註冊，避免 AI 隨手建立分類造成漂移
-- **跨領域隔離 + 全域共享**：`domain` 於 DB 端硬過濾，避免稀疏領域的記憶被排擠；保留 `"global"` 特殊領域供跨領域通用偏好使用
+儲思盆的魔法設定裡，藏著幾個對「記憶系統該長什麼樣子」很有啟發性的規則，這個專案把它們一條一條對應到實際設計上：
+
+- **抽出來的是思緒，不是畫面**——儲思盆裡看到的是被主人整理過的記憶，不是監視器錄影。對應到系統上就是只存 AI 精煉後「重點是什麼」的摘要，不存原始逐字對話。
+- **每段記憶都是一條完整的思路，不是零散的事實**——鄧不利多沉進儲思盆看到的是一整段「當時發生了什麼、所以他做了什麼判斷」，不是一堆孤立的關鍵字。對應到每筆記憶都記成「因為什麼情境（因）、所以得到什麼結論（果）」的完整脈絡，而不是一條孤零零的事實。
+- **舊記憶被新理解取代時，舊的那份不會憑空消失**——儲思盆裡的思緒可以反覆查看、也可以被本人重新萃取修正，但不會被悄悄竄改到面目全非。對應到記憶被修正或推翻時，舊版本一律保留、標記為「已被取代」，不會直接刪除，永遠查得到一件事是怎麼被修正的。
+- **不是誰都能隨便把思緒倒進儲思盆**——AI 要寫入一筆新記憶前，系統會先自己檢查：這跟已經記得的東西是重複、是補充、還是互相矛盾？只有真正判斷過的內容才會被存下來，重複或衝突的資訊不會無限累積；一旦偵測到明顯矛盾，系統會直接暫停，交由使用者本人確認，AI 不能自作主張覆蓋掉舊記憶。
+- **不同主人的思緒不會混在同一座儲思盆裡攪成一團**——記憶依「領域」分開存放（例如理財、寫程式、生活瑣事各自獨立），AI 想開一個新領域也需要先向系統「登記」，不能隨手亂建分類，避免記憶越存越亂；同時保留一個共用領域，放真正跨場景都適用的個人偏好。
 
 詳細設計脈絡見 [`Docs/Mnemosyne_MCP_Proposal.md`](Docs/Mnemosyne_MCP_Proposal.md)。
 
 ---
 
-## 技術架構
+## 這是怎麼「運作」的？
 
-```
-MCP Client (Cursor / Claude Desktop / 理財網頁)
-  └─ https://fintarck-proxy-*.asia-east1.run.app/mnemosyne/mcp?key=<KEY>
-       └─ Cloud Run Proxy（Nginx reverse proxy，Streamable HTTP）
-            └─ GCE e2-micro（與 NoCode_Project 共用主機，獨立 systemd service :8001）
-                 └─ Firestore（獨立 GCP 專案 mnemosyne-cb868，Native Vector Search）
-                      + Gemini（embedding + 寫入閘門判定，個人 Google AI Studio 訂閱）
+Mnemosyne 不是一個 App，而是一個掛在背後、透過 **MCP（Model Context Protocol）** 讓 AI 助理隨時可以「查詢」跟「寫入」的記憶庫。MCP 可以想成是 AI 助理跟外部工具之間的一份共通說明書——只要一個工具照這份說明書把自己「登記」進去，任何支援 MCP 的 AI 助理都能看懂、也能主動決定什麼時候該用它，不需要人手動複製貼上資料。
 
-GitHub Actions
-  └─ deploy-mnemosyne.yml → 推送 MCP_Service/** 自動 SSH 部署至 GCE
-```
+Mnemosyne 登記給 AI 的工具很單純，主要就四個：
 
-| 技術 | 用途 |
+| 工具 | AI 什麼時候會主動用它 |
+|------|------------------------|
+| `save_memory` | 對話中出現值得記住的偏好、規則、教訓時 |
+| `search_memories` | 需要回想「之前是不是聊過這件事」時 |
+| `pin_memory` | 這筆記憶重要到希望每次對話一開始就自動帶入 |
+| `forget_memory` | 這筆記憶過時了，希望封存起來不再被翻出來 |
+
+### 舉個例子
+
+假設你在跟某個 AI 助理聊天時提到：
+
+> 「我家貓咪小橘對雞肉口味的飼料會過敏，拉肚子拉得很嚴重，後來換成鮭魚口味才好。」
+
+背後實際發生的事情大致是這樣：
+
+1. **AI 判斷這句話值得記住**——不是每句話都要記，但這句帶有明確的「情境 + 教訓」，AI 主動呼叫 `save_memory` 工具，把它整理成「情境：小橘吃雞肉口味飼料會拉肚子｜結論：只能餵鮭魚口味」送給 Mnemosyne。
+2. **Mnemosyne 不會照單全收**——它會先在既有記憶裡找找看，有沒有語意相近或標籤相關的舊記憶（例如標籤「小橘」）。這次沒找到相關的，判定為全新記憶，正式存進資料庫。
+3. **幾個星期後，你換了另一個 AI 助理**（可能是不同視窗、甚至不同產品），想請它幫忙列一張採購清單，隨口問了句「小橘的飼料要買哪個口味來著？」
+4. **這個新的 AI 助理呼叫 `search_memories`**，把「小橘 飼料」丟給 Mnemosyne 查詢。Mnemosyne 用語意比對找到幾週前存的那筆記憶，回傳給 AI。
+5. **AI 接住這筆記憶，自然地回你**：「小橘對雞肉口味會過敏，記得買鮭魚口味的喔。」——即使這個 AI 助理跟第一次對話完全沒有共享任何 context，它「記得」的原因，是因為它跟第一個助理沉進了同一座儲思盆。
+
+如果之後情況有變（例如小橘換了新的腸胃科獸醫，連鮭魚口味都不能吃了），AI 再次呼叫 `save_memory` 時，Mnemosyne 會判斷這是對舊記憶的修正，自動把舊版本標記為「已被取代」並保留下來，同時讓新版本生效——你不需要自己去刪除或編輯任何東西，AI 之後查到的永遠是最新版本，但舊版本的脈絡也不會憑空消失。
+
+---
+
+## 給想深入了解技術細節的人
+
+這個 README 刻意不深談技術實作。如果你想知道背後怎麼架的（後端服務、資料庫、部署方式、開發規範），可以從這些文件開始看：
+
+| 文件 | 內容 |
 |------|------|
-| Python 3.10 + FastAPI | 後端框架（受限於部署主機鎖定版本） |
-| MCP SDK（Streamable HTTP） | AI 助理串接協定 |
-| Firebase / Google Cloud Firestore | 記憶儲存 + Native Vector Search |
-| `gemini-embedding-001` | 向量嵌入（個人 Google AI Studio 訂閱） |
-| `gemini-3.6-flash` | 寫入閘門判定（NOOP/UPDATE/SUPERSEDE/CONFLICT_DETECTED/ADD） |
-
-後端採 **Hexagonal Architecture（Ports & Adapters）**，把業務邏輯與 Python/GCP 框架細節隔離，方便日後遷移到其他語言/框架。架構細節、目錄結構、開發規範見 [`MCP_Service/CLAUDE.md`](MCP_Service/CLAUDE.md)。
-
----
-
-## 專案結構
-
-```
-Mnemosyne/
-├── Docs/
-│   └── Mnemosyne_MCP_Proposal.md   # 權威設計文件
-├── MCP_Service/                    # MCP Server 原始碼
-│   ├── domain/                     # 零框架依賴的業務邏輯
-│   ├── application/                # Use case 協調層
-│   ├── infrastructure/             # Firestore/Gemini 具體實作
-│   ├── interface/                  # MCP tool 註冊、Pydantic schema
-│   ├── scripts/                    # 部署輔助腳本（如 domain registry 遷移）
-│   ├── Task.md                     # 開發任務清單與現況
-│   └── CLAUDE.md                   # 開發規範（供 AI 輔助開發）
-└── .github/workflows/              # GitHub Actions CI/CD
-```
-
----
-
-## 本地開發
-
-```bash
-cd MCP_Service
-.venv/Scripts/python.exe -m pip install -e .
-
-# 執行 MCP Server
-.venv/Scripts/python.exe -m interface.mcp_server
-```
-
-必要環境變數：`MNEMOSYNE_MCP_KEY`（連線驗證金鑰）。AI 服務憑證與其他選填變數見下方。
-
----
-
-## 環境變數
-
-| 變數 | 說明 |
-|------|------|
-| `MNEMOSYNE_MCP_KEY` | 連線驗證金鑰，必填，未設定則服務拒絕所有連線 |
-| `GEMINI_API_KEY` | 個人 Google AI Studio API Key；設定後 embedding 與寫入閘門判定改走個人訂閱額度，不計入 GCP 帳單 |
-| `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Firestore 存取用的服務帳戶金鑰（base64） |
-| `MNEMOSYNE_GOOGLE_CLOUD_PROJECT_ID` | GCP 專案 ID（預設 `mnemosyne-cb868`） |
-| `MNEMOSYNE_GOOGLE_CLOUD_LOCATION` | Firestore/embedding 所在區域（預設 `asia-east1`） |
-| `MNEMOSYNE_GEMINI_CLASSIFIER_LOCATION` | Vertex AI 模式下 Gemini 分類器的區域（預設 `us-central1`） |
-
-完整清單與各變數的注意事項見 [`MCP_Service/CLAUDE.md`](MCP_Service/CLAUDE.md)。
-
----
-
-## 部署
-
-比照既有專案 `NoCode_Project` 的部署模式：GCE e2-micro（共用主機）+ Cloud Run Nginx Proxy + Firestore Spark。完整部署架構、環境變數設定與部署過程中排查出的環境/函式庫層級問題，詳見：
-
-| 文件 | 說明 |
-|------|------|
-| [`Docs/Mnemosyne_MCP_Proposal.md`](Docs/Mnemosyne_MCP_Proposal.md) | 完整設計文件（願景、架構、Schema、API 規格、記憶治理機制） |
+| [`Docs/Mnemosyne_MCP_Proposal.md`](Docs/Mnemosyne_MCP_Proposal.md) | 完整設計文件：願景、架構、Schema、API 規格、記憶治理機制 |
 | [`MCP_Service/Task.md`](MCP_Service/Task.md) | 開發任務清單、現況總覽 |
-| [`MCP_Service/CLAUDE.md`](MCP_Service/CLAUDE.md) | 架構、開發規範、部署踩坑紀錄（供 AI 輔助開發） |
+| [`MCP_Service/CLAUDE.md`](MCP_Service/CLAUDE.md) | 架構細節、開發規範、部署踩坑紀錄（供 AI 輔助開發） |
 
-**CI/CD**：推送至 `main` 分支且變更 `MCP_Service/**` 會自動觸發 GitHub Actions 部署至 GCE。
+---
+
+## 部署環境與 Client 連線設定
+
+### 部署架構
+
+Mnemosyne 是一個獨立部署的 MCP 伺服器，任何支援 MCP 的 AI 助理都是透過同一組網路位址連進來，不需要各自安裝或設定資料庫：
+
+```
+MCP Client（Cursor / Claude Desktop / 理財網頁…）
+  └─ https://<proxy-host>/mnemosyne/mcp?key=<MNEMOSYNE_MCP_KEY>
+       └─ Cloud Run Proxy（Nginx reverse proxy，Streamable HTTP）
+            └─ GCE 主機（獨立 systemd service，:8001）
+                 └─ Firestore（獨立 GCP 專案，Native Vector Search）
+                      + Gemini（負責把記憶內容轉成可搜尋的向量，以及判斷新記憶該怎麼寫入）
+```
+
+所有 Client 共用同一條連線字串——`domain`（理財、寫程式…）是呼叫工具時才決定的參數，不綁定在連線這一層，所以同一個帳號的所有 AI 助理，天生就是接到同一座儲思盆，不需要每個 Client 各自設定要連哪個資料庫。
+
+### Client 怎麼設定連線
+
+不管哪個 Client，本質上都只需要提供**同一組網址**（已內含驗證用的金鑰）：
+
+```
+https://<proxy-host>/mnemosyne/mcp?key=<MNEMOSYNE_MCP_KEY>
+```
+
+- **Claude Desktop**：設定 → Connectors（連接器）→ Add custom connector，貼上上面這組網址即可，不需要額外安裝任何東西。
+- **Cursor 或其他支援 MCP 設定檔的工具**：在 MCP 設定檔（通常是一段 JSON）裡加入一個 server 項目，指向同一組網址，例如：
+
+  ```json
+  {
+    "mcpServers": {
+      "mnemosyne": {
+        "url": "https://<proxy-host>/mnemosyne/mcp?key=<MNEMOSYNE_MCP_KEY>"
+      }
+    }
+  }
+  ```
+
+連上之後，AI 助理會自動看到 `save_memory`、`search_memories`、`pin_memory`、`forget_memory` 這幾個工具，之後什麼時候該記、該查，都是 AI 自己判斷，不需要手動操作。金鑰請妥善保管，不要貼到公開的地方——任何拿到這組網址的人都能讀寫你的記憶庫。
