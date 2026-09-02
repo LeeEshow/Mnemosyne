@@ -351,6 +351,8 @@ score = w1 · relevance(向量相似度)
 
 經 Python 重新計算分數並排序後，最後僅返回 Top-L（如 L=3）的記憶給 AI 助理。此機制能有效讓低重要性、長期未被存取的記憶自然沉底。
 
+「日後依實測調整」已有對應工具：`MCP_Service/scripts/run_retrieval_benchmark.py` 是一份可重複執行的檢索驗收 benchmark，針對一組「真實 query → 應命中 doc_id」案例量測召回與排序正確率，調整上表權重或 `λ` 前後都應重跑比對，取代單純憑感覺判斷。詳見 `MCP_Service/CLAUDE.md`、`MCP_Service/Task.md` Phase 2.9。
+
 ### 6.2 因果修正迴路 (Causal Revision Loop)
 原「經驗學習迴路」隨 `reflect_on_task` 併入 `save_memory`（見 2.5）而重新框架：任務結果本質上就是一組因果記錄（`premise`=過程與成因、`conclusion`=經驗教訓），AI 完成任務後可直接呼叫 `save_memory` 記錄，不需要獨立工具或獨立的觸發時機判斷。下次遇到相似情境時，`search_memories` 會將這類記憶檢索出來作為前車之鑑；若新情境與舊結論矛盾，則透過 5.1 節的寫入閘門走 `SUPERSEDE` 或 `CONFLICT_DETECTED` 流程，形成「因 → 果 → 檢索復用 → 因情境變化而修正」的持續迴圈，而不是單向累積的事實清單。
 

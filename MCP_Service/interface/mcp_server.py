@@ -1,4 +1,6 @@
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -17,8 +19,10 @@ from application.pin_memory_use_case import PinMemoryUseCase
 from application.register_domain_use_case import RegisterDomainRequest, RegisterDomainUseCase
 from application.save_memory_use_case import SaveMemoryRequest, SaveMemoryUseCase
 from application.search_memories_use_case import SearchMemoriesRequest, SearchMemoriesUseCase
+from application.startup_checks import verify_stored_embedding_dimension
 from domain.exceptions import DomainNotRegisteredError
 from domain.models import Domain, Memory
+from domain.ports.memory_repository import MemoryRepository
 from infrastructure.firestore_domain_repository import FirestoreDomainRepository
 from infrastructure.firestore_memory_repository import FirestoreMemoryRepository
 from infrastructure.gemini_gate_classifier import GeminiGateClassifier
@@ -45,11 +49,10 @@ mean the user never mentioned the topic.
 LOAD PINNED: Call load_pinned_memories once at the start of each session, not repeatedly.
 """
 
-mcp_server = MCPServer("mnemosyne", instructions=_INSTRUCTIONS)
-
 
 @dataclass(frozen=True)
 class _Dependencies:
+    repository: MemoryRepository
     save_memory: SaveMemoryUseCase
     search_memories: SearchMemoriesUseCase
     forget_memory: ForgetMemoryUseCase
@@ -66,6 +69,7 @@ def _dependencies() -> _Dependencies:
     embedding_provider = VertexEmbeddingProvider()
     gate_classifier = GeminiGateClassifier()
     return _Dependencies(
+        repository=repository,
         save_memory=SaveMemoryUseCase(repository, embedding_provider, gate_classifier, domain_repository),
         search_memories=SearchMemoriesUseCase(repository, embedding_provider, domain_repository),
         forget_memory=ForgetMemoryUseCase(repository),
@@ -74,6 +78,18 @@ def _dependencies() -> _Dependencies:
         list_domains=ListDomainsUseCase(domain_repository),
         register_domain=RegisterDomainUseCase(domain_repository),
     )
+
+
+@asynccontextmanager
+async def _lifespan(_: MCPServer) -> AsyncIterator[None]:
+    # 伺服器啟動時抽樣讀取一筆既有 memory，確認實際存放的 embedding 維度跟目前
+    # config.EMBEDDING_DIMENSION 相符；不符合就 fail-fast 中止啟動，而非留到第一次
+    # 查詢時才在 Firestore 層噴出難以定位的維度錯誤（Phase 2.9.1）。
+    await verify_stored_embedding_dimension(_dependencies().repository)
+    yield
+
+
+mcp_server = MCPServer("mnemosyne", instructions=_INSTRUCTIONS, lifespan=_lifespan)
 
 
 def _to_memory_view(memory: Memory) -> tool_schemas.MemoryView:

@@ -1,3 +1,7 @@
+class ConfigurationError(Exception):
+    pass
+
+
 class DomainNotRegisteredError(Exception):
     def __init__(self, registered_domains: tuple[str, ...]) -> None:
         self.registered_domains = registered_domains

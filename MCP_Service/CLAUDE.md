@@ -32,6 +32,10 @@ There is no build step; this is a plain Python package.
 # One-time deploy prerequisite: seed the Domain Registry from existing memories
 # (must run before restarting the service with domain-registration enforcement live)
 .venv/Scripts/python.exe -m scripts.seed_domain_registry
+
+# Retrieval accuracy benchmark against production Firestore (Phase 2.9) — see the harness gotcha
+# in the Architecture section before running many cases back-to-back (shared Gemini quota).
+.venv/Scripts/python.exe -m scripts.run_retrieval_benchmark
 ```
 
 Environment variables (see `config.py` / `interface/mcp_server.py` / `infrastructure/firebase_app.py`):
@@ -226,6 +230,46 @@ whose target subsequently gets superseded). `resolve_active_memory_id()` therefo
 `visited` set to bail out instead of infinite-looping if a cycle ever exists in the data. `PinMemoryUseCase.execute()`
 and `ForgetMemoryUseCase.execute()` both call this before touching the repository.
 
+**Startup fail-fast: embedding model/dimension consistency (Phase 2.9).** Two independent guards, both
+raising `domain/exceptions.py::ConfigurationError` (never `assert` — stripped under `python -O`, and must
+not live at `config.py` import time since that module is imported by AI-key-agnostic offline scripts like
+`scripts/seed_domain_registry.py` and would drag them down too):
+1. **Static.** `VertexEmbeddingProvider.__init__` — when `GEMINI_API_KEY` is unset (falls back to Vertex
+   AI's `text-multilingual-embedding-002`, fixed 768-dim output, no truncation support), it checks
+   `config.EMBEDDING_DIMENSION` actually equals that model's native dimension before constructing the
+   client. `GEMINI_API_KEY` is read via `(os.environ.get("GEMINI_API_KEY") or "").strip() or None`, not
+   `bool(api_key)` — a whitespace-only env var (`GEMINI_API_KEY=" "`) is truthy under `bool()` and would
+   silently skip both this check and the API-key branch, only failing later at the Google API auth step.
+2. **Dynamic.** `application/startup_checks.py::verify_stored_embedding_dimension()` samples one *active*
+   memory (`MemoryRepository.sample_one()` — filtered to `status=="active"`; `limit(1)` with no `order_by`
+   means Firestore can return any document, and an unfiltered sample could land on a stale/malformed
+   snapshot and `KeyError` in `_to_memory()` instead of raising the intended `ConfigurationError`) and
+   compares its stored `len(embedding)` against `config.EMBEDDING_DIMENSION`, catching the case where the
+   *index* was built at one dimension but the currently-configured model would produce another. Wired via
+   `mcp_server.py`'s `_lifespan` async context manager, passed as `MCPServer(..., lifespan=_lifespan)` —
+   not the `@lru_cache`d `_dependencies()` factory, which only runs lazily on the first tool call. Tracing
+   the vendored MCP SDK confirms `streamable_http_app()` threads this `lifespan` into Starlette's ASGI
+   `lifespan` via `session_manager.run()`, so it runs exactly once at process startup; a raised
+   `ConfigurationError` here aborts uvicorn startup outright ("Application startup failed. Exiting.") rather
+   than surfacing as a confusing failure on the first real tool call.
+
+**`search_memories` has an internal-only `record_access` opt-out, and a retrieval benchmark harness now
+exists (Phase 2.9).** `SearchMemoriesRequest.record_access: bool = True` — when `False`, `execute()` skips
+the `_record_access(top)` write that increments hit memories' `access_count` (which feeds the decay
+formula's `access_frequency` term, 6.1 in the Proposal doc). The MCP tool handler in `interface/mcp_server.py`
+never passes this field, so the real `search_memories` tool call always keeps the default `True` — this
+exists purely so `scripts/run_retrieval_benchmark.py` can repeatedly query production Firestore without
+each run inflating the very scores it's trying to measure (a benchmark that mutates the data it evaluates
+against isn't reproducible run-to-run). The harness reads cases from `scripts/retrieval_benchmark_cases.py`
+(a `.py` module, not `.json` — the repo-root `.gitignore` blanket-blocks `*.json` to keep credential files
+out of version control, and a `.json` case file would be silently git-ignored too), each a `domain`/`query`/
+`expected_order` (doc IDs in expected rank order — a single element only checks recall, multiple also check
+relative ordering) tuple plus optional `type`/`exact_tags`/`limit`. Run via
+`python -m scripts.run_retrieval_benchmark` from `MCP_Service/`. Case `limit` defaults to
+`config.SEARCH_MEMORIES_DEFAULT_LIMIT` (not some more generous number) — a case that only recalls under a
+looser limit doesn't prove the real tool (which uses the production default) would surface it. See the
+Gemini quota gotcha below before running many cases back-to-back.
+
 **Two decision enums, intentionally split.** `WriteGateDecision` (`domain/write_gate_policy.py`) is the
 internal write-gate classification only. `SaveMemoryDecision` (`application/save_memory_use_case.py`) is
 the outward-facing result and adds `REQUIRES_REGISTRATION`/`CONFLICT_DETECTED` with deliberately
@@ -335,3 +379,26 @@ Switching `GEMINI_API_KEY` on/off, or changing which embedding model is active, 
 new queries. There is no in-place migration for this; the fix is wiping and re-adding memories after a
 switch, not recomputing embeddings. Given the above, in practice this project is currently committed to the
 Google AI Studio path — treat that as the standing assumption, not a togglable option.
+
+**The personal Google AI Studio key has a shared per-minute embedding quota, and it *will* get exhausted
+under concurrent testing (first hit 2026-09-01/02, during Phase 2.9 development).** Both `save_memory` and
+`search_memories` call `VertexEmbeddingProvider.embed()`, which hits
+`generativelanguage.googleapis.com/.../gemini-embedding-001:batchEmbedContents`. That endpoint's quota
+(`aiplatform.googleapis.com/global_embed_content_requests_per_minute_per_base_model` — note the
+`aiplatform.googleapis.com` quota namespace even though the actual call goes through the AI-Studio-key
+client, not Vertex; that's just how Google buckets this quota internally) is shared across *every* caller
+using this one key — multiple Claude sessions (PM, SE, or anyone else) testing at the same time can burn
+through it within seconds. When exhausted, `google.genai.errors.ClientError` (HTTP 429
+`RESOURCE_EXHAUSTED`) propagates up through `search_memories`'s handler as a bare exception, and per the
+MCP SDK gotcha above, the AI client only ever sees the generic `"Error executing tool search_memories"` —
+the real 429 is visible only in `sudo journalctl -u mnemosyne.service` server-side.
+**This is not a fixed/broken binary state — it's live contention.** Requests made seconds apart in the same
+testing burst can alternate between success and 429 depending on exactly when each one lands relative to
+the rolling per-minute window; don't conclude "it's fixed" from one successful retry, or "it's still broken"
+from one more failure — check a short, recent log window (`--since '5 min ago'`) to see the actual pattern
+before drawing a conclusion. `scripts/run_retrieval_benchmark.py` throttles between cases
+(`_CASE_THROTTLE_SECONDS = 3.0`) and classifies 429s as `CaseStatus.QUOTA_EXCEEDED` (separate from a real
+`FAIL`) for exactly this reason — see the harness gotcha above. No code-level fix exists yet for the
+interactive `save_memory`/`search_memories` tool paths themselves; options noted but not yet acted on:
+request a quota increase from Google (the 429 error body includes the request link), or add longer 429-
+specific backoff to the `tenacity` retry already wrapping `google-genai` calls.

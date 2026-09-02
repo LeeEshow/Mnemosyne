@@ -5,7 +5,7 @@
 
 ---
 
-## 現況總覽（Phase 1 + 2 + 2.6 + 2.7 + 2.8 已完成部署與修復驗證）
+## 現況總覽（Phase 1 + 2 + 2.6 + 2.7 + 2.8 已完成部署與修復驗證；2.9 開發與 code review 已完成，待提交部署）
 
 > 程式碼架構模式（Hexagonal Architecture、目錄結構、三條硬規則）已移至 `CLAUDE.md`「Architecture」章節，不在此重複。
 
@@ -22,6 +22,11 @@
 * **Phase 2.6（Token 消耗優化）**：移除動態 domain 描述快取注入解鎖 Prompt Cache，整併 `pin_memory`/`unpin_memory` 為單一工具，將 schema 英文化並大幅簡寫以削減 token，完成 response payload 瘦身並調整搜尋預設 limit 至 2。
 * **Phase 2.7（使用回饋問題修復）**：完成了 5 項核心使用回饋問題修復，包含 tags 雙向聯集合併、SUPERSEDE 狀態繼承（is_pinned / access_count）、回傳最終生效記憶預覽、改用手動驗證長度與自訂錯誤（解決 client 端 byte 計算問題）、以及 type 欄位正規化以相容既有資料。
 * **Phase 2.8（儲存機制優化與 Bug 修復）**：完成了 `UPDATE` 儲存機制優化（原地覆寫 + 歷史快照以留存審計軌跡，保持 ID 與時效/重要度穩定）、修復了 `SUPERSEDE` 重要度丟失 Bug，並在 `pin`/`forget` 寫入路徑上加入多代遞迴 ID 解析以防過期 ID 懸空。
+* **Phase 2.9（Embedding 防呆機制 + 檢索驗收測試集）**：開發與 agy code review 已完成，待提交部署。新增啟動時的
+  embedding 模型/維度一致性 fail-fast 檢查（靜態 + 動態兩層）、`search_memories` 內部無副作用開關
+  （`record_access`）、以及可重複執行的檢索驗收 benchmark（`scripts/run_retrieval_benchmark.py`，7 筆真實案例）。
+  過程中意外發現並記錄了 Gemini embedding API 的每分鐘配額在多人同時測試下會被打滿（持續性配額競爭，非程式碼
+  bug）。實作細節與踩坑見 `CLAUDE.md`。
 
 ---
 
@@ -44,5 +49,25 @@
 4. **防禦性 Pydantic 一致性修復**：修正 `_build_memory` 中對 `importance_score` 的 falsy Coercion 判斷（改用 `is not None`），以確保若傳入 0 分時不會被誤判重設為預設值 5。
 
 **驗證方式**：使用驗證腳本測試了多代鏈 `A→B→C→D` 遞迴解析、快照內容保存與重要度繼承邏輯，已全數通過驗證。
+
+---
+
+## Phase 2.9（開發與 agy code review 已完成，待提交部署）：Embedding 防呆機制 + 檢索驗收測試集
+
+**現況**：`search_memories` 的召回準確度過去完全無法量化驗證（只能人工試打），且 embedding 模型/維度若跟部署環境（`GEMINI_API_KEY` 是否設定）不一致，過去沒有任何檢查會提前示警，只會在 Firestore 層噴出難以定位的錯誤。背景與原始方案為何被否決（agy 覆核發現的三個盲區）詳見對話紀錄；參考來源是同事 Tina27《The RAG Blueprint》簡報。
+
+**最終實現方案**：
+1. **Embedding 模型/維度 fail-fast（靜態 + 動態兩層）**：`VertexEmbeddingProvider.__init__` 在退回 Vertex AI fallback 模型時檢查其原生維度是否符合 `config.EMBEDDING_DIMENSION`；`application/startup_checks.py::verify_stored_embedding_dimension()` 在伺服器啟動時（掛在 `MCPServer(lifespan=...)`）抽樣一筆既有記憶比對實際存放維度。兩者不符皆 `raise ConfigurationError`（新增於 `domain/exceptions.py`），不使用 `assert`、不放在 `config.py` 模組層級，避免波及不需要 AI Key 的離線腳本。
+2. **`search_memories` 無副作用開關**：`SearchMemoriesRequest` 新增 `record_access: bool = True`，測試集執行時傳 `False` 略過 `access_count` 寫回，避免 benchmark 反覆執行自我墊高衰減公式分數；MCP 對外工具行為不變。
+3. **檢索驗收 benchmark**（`scripts/run_retrieval_benchmark.py` + `scripts/retrieval_benchmark_cases.py`，7 筆真實案例）：`domain`/`query`/`expected_order`（doc_id 依預期排序）格式，`limit` 對齊 `config.SEARCH_MEMORIES_DEFAULT_LIMIT`；429 配額限制與其他例外皆獨立分類（`QUOTA_EXCEEDED`/`ERROR`），不會跟真正的排序/召回失敗（`FAIL`）混淆或讓整批測試中斷；案例間有節流。跑法：`python -m scripts.run_retrieval_benchmark`。實作細節、程式碼位置、以及 agy 覆核抓出的 5 項發現（`_DEFAULT_CASE_LIMIT` 與正式環境脫節、`sample_one()` 抽樣無過濾、`bool(api_key)` 空白字元繞過、harness 例外處理會讓整批中斷等，皆已修正）見 `CLAUDE.md`。
+
+**已知限制（留待之後評估，非本次阻塞項）**：
+- 7 筆真實案例目前全是單一 doc_id 的語意召回驗證，尚未涵蓋「時效/重要度衝突」的多元素排序驗證——`search_memories` 的 `MemoryView` 不回傳 `importance_score`/`created_at`，需要另外造一組已知數值的專用測試記憶才能建案例。
+- `run_retrieval_benchmark.py` 本身尚未端對端執行過（本機無 `GEMINI_API_KEY`/`GOOGLE_APPLICATION_CREDENTIALS_JSON`），目前只驗證過案例資料本身正確（7/7 手動確認命中），以及用 fake port 驗證過腳本邏輯；腳本第一次真正執行留待有本機憑證或部署後。
+- 過程中排查 `search_memories` 疑似故障時，確認 Gemini embedding API 的每分鐘配額在多人同時測試下會被打滿（持續性配額競爭，非程式碼 bug），詳見 `CLAUDE.md`「Gemini API」章節；順便也發現並由使用者修正了一筆 `finance` domain 記憶的資料品質問題（`conclusion` 欄位混入工具呼叫殘留文字）。
+
+**驗證方式**：全數以 fake port（`MemoryRepository`/`EmbeddingProvider`/`DomainRepository`）跑過的一次性腳本驗證（維度相符/不符、`record_access=False` 生效、429/其他例外分類、節流生效、空白字元金鑰觸發 `ConfigurationError` 等），未提交進版控；7 筆真實案例的資料正確性另以連線中的 `search_memories` 工具手動驗證（7/7 通過）。
+
+**本次不列入範圍（已與 agy 討論並暫緩）**：Cross-encoder 二次重排、`superseded_by` 因果鏈擴充為依賴圖（Graph DB）。兩者在 Mnemosyne「Agent-Centric」的架構特性下（記憶寫入時已是低雜訊的因果對、接收端是有推理能力的 LLM 而非人類）投入產出比不划算，個人記憶規模（數百~數千筆）用 LLM context 做 in-context 推理即可滿足「記憶關聯推理」的需求，不需要額外的重排模型或圖資料庫。加上重排會在 MCP 同步呼叫路徑上多引入一次 LLM 呼叫延遲，直接影響對話體感。
 
 ---

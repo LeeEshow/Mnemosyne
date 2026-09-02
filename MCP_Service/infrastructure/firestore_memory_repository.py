@@ -27,6 +27,10 @@ class FirestoreMemoryRepository:
         snapshot = await asyncio.to_thread(self._collection.document(memory_id).get)
         return self._to_memory(snapshot) if snapshot.exists else None
 
+    async def sample_one(self) -> Memory | None:
+        snapshots = await asyncio.to_thread(self._query_sample_one)
+        return self._to_memory(snapshots[0]) if snapshots else None
+
     async def find_nearest(
         self, domain: str, embedding: tuple[float, ...], limit: int, status_filter: MemoryStatusFilter
     ) -> list[ScoredMemory]:
@@ -110,6 +114,13 @@ class FirestoreMemoryRepository:
     def _query_by_tags(self, tags: tuple[str, ...]) -> list[DocumentSnapshot]:
         limited_tags = list(tags[: config.FIRESTORE_ARRAY_CONTAINS_ANY_LIMIT])
         query = self._collection.where(filter=FieldFilter("tags", "array_contains_any", limited_tags))
+        return list(query.get())
+
+    def _query_sample_one(self) -> list[DocumentSnapshot]:
+        # 限定 status=="active"：limit(1) 沒有 order_by，Firestore 不保證抽到哪一份文件，若剛好
+        # 抽到欄位不齊的舊資料/歷史快照，_to_memory() 對缺欄位沒有防禦會直接 KeyError，讓這個本來
+        # 要做 fail-fast 防呆的檢查，自己先把 ASGI 啟動搞崩潰。
+        query = self._collection.where(filter=FieldFilter("status", "==", MemoryStatus.ACTIVE.value)).limit(1)
         return list(query.get())
 
     def _query_pinned_by_domain(self, domain: str) -> list[DocumentSnapshot]:

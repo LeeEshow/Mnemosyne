@@ -29,6 +29,7 @@ class SearchMemoriesRequest:
     limit: int = config.SEARCH_MEMORIES_DEFAULT_LIMIT
     include_superseded: bool = False
     include_archived: bool = False
+    record_access: bool = True
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,8 @@ class SearchMemoriesUseCase:
         candidates = await self._gather_candidates(request, status_filter)
         filtered = self._apply_type_filter(candidates, request.type)
         top = self._rank_top(filtered, request.limit)
-        await self._record_access(top)
+        if request.record_access:
+            await self._record_access(top)
         return SearchMemoriesResult(tuple(scored.memory for scored in top))
 
     async def _gather_candidates(
