@@ -5,7 +5,12 @@ from enum import Enum
 
 import config
 from application.domain_validation import ensure_domain_registered
-from domain.exceptions import DomainNotRegisteredError
+from domain.exceptions import (
+    DomainNotRegisteredError,
+    UpstreamComponent,
+    UpstreamFailureKind,
+    UpstreamServiceError,
+)
 from domain.models import Memory, MemoryContentUpdate, MemoryStatus, MemoryStatusFilter
 from domain.ports.domain_repository import DomainRepository
 from domain.ports.embedding_provider import EmbeddingProvider
@@ -143,7 +148,11 @@ class SaveMemoryUseCase:
         for candidate in candidates:
             if candidate.memory.id == memory_id:
                 return candidate
-        raise ValueError(f"寫入閘門判定回傳的 matched_memory_id={memory_id!r} 不在候選名單中")
+        raise UpstreamServiceError(
+            UpstreamComponent.GATE_CLASSIFIER,
+            UpstreamFailureKind.BAD_RESPONSE,
+            f"matched_memory_id={memory_id!r} 不在候選名單中",
+        )
 
     async def _apply_update(
         self, verdict: GateVerdict, candidate: GateCandidate, request: SaveMemoryRequest

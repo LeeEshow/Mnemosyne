@@ -4,7 +4,8 @@ from google import genai
 from google.genai import types
 
 import config
-from domain.exceptions import ConfigurationError
+from domain.exceptions import ConfigurationError, UpstreamComponent
+from infrastructure.upstream_errors import GenaiFailure, translate_genai_error
 
 # text-multilingual-embedding-002（GEMINI_API_KEY 未設定時的 Vertex AI fallback 模型）固定輸出
 # 768 維，不支援 output_dimensionality 截斷，跟 gemini-embedding-001 那條路徑不同。
@@ -45,7 +46,10 @@ class VertexEmbeddingProvider:
             if self._using_api_key
             else None
         )
-        response = await self._client.aio.models.embed_content(
-            model=config.EMBEDDING_MODEL, contents=text, config=embed_config
-        )
+        try:
+            response = await self._client.aio.models.embed_content(
+                model=config.EMBEDDING_MODEL, contents=text, config=embed_config
+            )
+        except GenaiFailure as error:
+            raise translate_genai_error(UpstreamComponent.EMBEDDING, error) from error
         return tuple(response.embeddings[0].values)

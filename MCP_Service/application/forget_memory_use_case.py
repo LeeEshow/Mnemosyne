@@ -15,9 +15,10 @@ class ForgetMemoryUseCase:
     def __init__(self, repository: MemoryRepository) -> None:
         self._repository = repository
 
-    async def execute(self, request: ForgetMemoryRequest) -> None:
+    async def execute(self, request: ForgetMemoryRequest) -> str:
         active_id = await resolve_active_memory_id(self._repository, request.memory_id)
         if request.hard_delete:
             await self._repository.delete(active_id)
-            return
-        await self._repository.set_status(active_id, MemoryStatus.ARCHIVED)
+        else:
+            await self._repository.set_status(active_id, MemoryStatus.ARCHIVED)
+        return active_id

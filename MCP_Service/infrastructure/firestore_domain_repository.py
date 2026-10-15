@@ -6,8 +6,10 @@ from google.cloud.firestore_v1.document import DocumentSnapshot
 import config
 from domain.models import Domain
 from infrastructure import firebase_app
+from infrastructure.upstream_errors import translating_firestore_errors
 
 
+@translating_firestore_errors
 class FirestoreDomainRepository:
     def __init__(self) -> None:
         firebase_app.ensure_initialized()

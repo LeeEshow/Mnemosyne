@@ -138,6 +138,11 @@ class SaveMemoryResponse(BaseModel):
     merged_memory: MemoryView | None = None
 
 
+class MemoryActionResponse(BaseModel):
+    doc_id: str
+    action: str
+
+
 class SearchMemoriesResponse(BaseModel):
     memories: list[MemoryView]
 

@@ -1,3 +1,4 @@
+from domain.exceptions import MemoryNotFoundError
 from domain.models import MemoryStatus
 from domain.ports.memory_repository import MemoryRepository
 
@@ -8,7 +9,9 @@ async def resolve_active_memory_id(repository: MemoryRepository, memory_id: str)
     while current_id not in visited:
         visited.add(current_id)
         memory = await repository.get_by_id(current_id)
-        if memory is None or memory.status != MemoryStatus.SUPERSEDED or not memory.superseded_by:
+        if memory is None:
+            raise MemoryNotFoundError(memory_id)
+        if memory.status != MemoryStatus.SUPERSEDED or not memory.superseded_by:
             return current_id
         current_id = memory.superseded_by
     return current_id

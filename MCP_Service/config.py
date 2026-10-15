@@ -18,6 +18,8 @@ EMBEDDING_DIMENSION = 1536
 # （404 "no longer available to new users"），Vertex AI 企業版生命週期是分開的，
 # 目前仍可用，所以比照 EMBEDDING_MODEL 依 GEMINI_API_KEY 連動切換。
 GATE_CLASSIFIER_MODEL = "gemini-3.6-flash" if os.environ.get("GEMINI_API_KEY") else "gemini-2.5-flash"
+# 主模型回 503/429 時改打另一個模型一次（各模型的過載是獨立計算的）；Vertex 路徑沒有備援。
+GATE_CLASSIFIER_FALLBACK_MODEL = "gemini-3.5-flash" if os.environ.get("GEMINI_API_KEY") else None
 
 FIRESTORE_ARRAY_CONTAINS_ANY_LIMIT = 10
 

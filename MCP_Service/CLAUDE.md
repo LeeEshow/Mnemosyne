@@ -113,6 +113,31 @@ to the calling AI, you must catch it and re-raise `mcp.server.mcpserver.exceptio
 in `interface/mcp_server.py` — see how `DomainNotRegisteredError` and the write-gate's `ValueError` are
 handled in each tool handler for the pattern to copy for any new exception path.
 
+**Tool error reporting.** Every tool in `interface/mcp_server.py` is wrapped by
+`interface/tool_errors.py::translate_tool_errors(read_only=...)`, so no failure reaches the client as the
+SDK's bare "Error executing tool X". Failures are domain exceptions (`domain/exceptions.py`):
+`UpstreamServiceError(component, kind)` for Gemini/Firestore problems (translated from google SDK errors
+in `infrastructure/upstream_errors.py`; Firestore repositories get this via the
+`@translating_firestore_errors` class decorator, so a new public async repository method is covered
+automatically), `MemoryNotFoundError`, `DomainNotRegisteredError`. Message shape:
+`【環節】原因｜寫入狀態｜建議`. The write-state part is derived, not stored: embedding/classifier failures are
+always "內容未寫入" because they happen before any write in `save_memory`; Firestore failures on a write tool
+are "寫入狀態不確定" because `UPDATE`/`SUPERSEDE` are multi-step and non-transactional. Anything unrecognised
+gets a short code that is also logged with its traceback. New exception paths: raise a domain exception in
+`application/` or translate it in `infrastructure/` — don't add `try/except ToolError` in tool handlers.
+`forget_memory`/`pin_memory` return `{doc_id, action}` with the *resolved* active id, and raise
+`MemoryNotFoundError` for an unknown id (Firestore's `delete` is idempotent and used to fake success).
+
+**Gate classifier fallback model.** `config.GATE_CLASSIFIER_FALLBACK_MODEL` (`gemini-3.5-flash`, API-key mode
+only) is tried once when the primary model fails with 503/429/connection/404 — a different model has its own
+capacity, which is what a 503 "high demand" error is about. Auth, bad-request and malformed-response
+failures do not fall back (another model can't fix them). No server-side retry on purpose: the client
+retries. Before changing either model name, confirm it with `client.models.list()` using the production key.
+
+**Tests.** `tests/` uses stdlib `unittest` (no new dependency): from `MCP_Service/`, with deps installed and
+`GEMINI_API_KEY` set to any value, run `python -m unittest discover -s tests -t .`. They use fakes at the
+port boundary, as described under Commands.
+
 **Domain Registry.** `domain` is a required string parameter on `save_memory`/`search_memories`/
 `load_pinned_memories` (not bound to the connection), normalized via `domain/domain_naming.py`
 (`strip().lower()`) and validated against the `domains` Firestore collection (doc ID = the normalized
@@ -400,5 +425,6 @@ before drawing a conclusion. `scripts/run_retrieval_benchmark.py` throttles betw
 (`_CASE_THROTTLE_SECONDS = 3.0`) and classifies 429s as `CaseStatus.QUOTA_EXCEEDED` (separate from a real
 `FAIL`) for exactly this reason — see the harness gotcha above. No code-level fix exists yet for the
 interactive `save_memory`/`search_memories` tool paths themselves; options noted but not yet acted on:
-request a quota increase from Google (the 429 error body includes the request link), or add longer 429-
-specific backoff to the `tenacity` retry already wrapping `google-genai` calls.
+request a quota increase from Google (the 429 error body includes the request link). There is no
+`tenacity` retry anywhere in this codebase (an earlier version of this paragraph claimed there was) —
+retrying is left to the MCP client, by design; see "Tool error reporting" above for what the client sees.

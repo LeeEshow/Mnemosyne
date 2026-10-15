@@ -1,12 +1,27 @@
 import json
+import logging
 import os
 
 from google import genai
 from google.genai import types
 
 import config
+from domain.exceptions import UpstreamComponent, UpstreamFailureKind, UpstreamServiceError
 from domain.models import Memory
 from domain.write_gate_policy import GateVerdict, WriteGateDecision
+from infrastructure.upstream_errors import GenaiFailure, translate_genai_error
+
+_logger = logging.getLogger(__name__)
+
+# 可用另一個模型繞過的失敗；認證、請求格式、回傳格式問題換模型也不會好。
+_FALLBACK_ELIGIBLE_KINDS = frozenset(
+    {
+        UpstreamFailureKind.OVERLOADED,
+        UpstreamFailureKind.QUOTA_EXCEEDED,
+        UpstreamFailureKind.UNAVAILABLE,
+        UpstreamFailureKind.MODEL_UNAVAILABLE,
+    }
+)
 
 _PROMPT_TEMPLATE = """你是記憶庫寫入判定助手，請比較「新記憶」與「候選記憶清單」，選擇動作：
 1. NOOP：語意完全相同。
@@ -60,21 +75,50 @@ class GeminiGateClassifier:
 
     async def classify(self, new_memory: Memory, candidates: tuple[Memory, ...]) -> GateVerdict:
         prompt = self._build_prompt(new_memory, candidates)
-        response = await self._client.aio.models.generate_content(
-            model=config.GATE_CLASSIFIER_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json", response_schema=_RESPONSE_SCHEMA
-            ),
-        )
-        payload = json.loads(response.text)
-        return GateVerdict(
-            decision=WriteGateDecision(payload["decision"]),
-            matched_memory_id=payload.get("matched_memory_id") or None,
-            merged_title=payload.get("merged_title"),
-            merged_premise=payload.get("merged_premise"),
-            merged_conclusion=payload.get("merged_conclusion"),
-        )
+        response = await self._generate_with_fallback(prompt)
+        return self._parse_verdict(response)
+
+    async def _generate_with_fallback(self, prompt: str):
+        primary_model = config.GATE_CLASSIFIER_MODEL
+        fallback_model = config.GATE_CLASSIFIER_FALLBACK_MODEL
+        try:
+            return await self._generate(primary_model, prompt)
+        except UpstreamServiceError as primary_error:
+            if fallback_model is None or primary_error.kind not in _FALLBACK_ELIGIBLE_KINDS:
+                raise
+            _logger.warning("分類器主模型 %s 失敗（%s），改用備援模型 %s", primary_model, primary_error, fallback_model)
+            try:
+                return await self._generate(fallback_model, prompt)
+            except UpstreamServiceError as fallback_error:
+                detail = f"主模型 {primary_model} 與備援模型 {fallback_model} 皆失敗"
+                raise UpstreamServiceError(UpstreamComponent.GATE_CLASSIFIER, fallback_error.kind, detail) from fallback_error
+
+    async def _generate(self, model: str, prompt: str):
+        try:
+            return await self._client.aio.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", response_schema=_RESPONSE_SCHEMA
+                ),
+            )
+        except GenaiFailure as error:
+            raise translate_genai_error(UpstreamComponent.GATE_CLASSIFIER, error) from error
+
+    def _parse_verdict(self, response) -> GateVerdict:
+        try:
+            payload = json.loads(response.text)
+            return GateVerdict(
+                decision=WriteGateDecision(payload["decision"]),
+                matched_memory_id=payload.get("matched_memory_id") or None,
+                merged_title=payload.get("merged_title"),
+                merged_premise=payload.get("merged_premise"),
+                merged_conclusion=payload.get("merged_conclusion"),
+            )
+        except (TypeError, ValueError, KeyError, AttributeError) as error:
+            raise UpstreamServiceError(
+                UpstreamComponent.GATE_CLASSIFIER, UpstreamFailureKind.BAD_RESPONSE, type(error).__name__
+            ) from error
 
     def _build_prompt(self, new_memory: Memory, candidates: tuple[Memory, ...]) -> str:
         candidates_block = "\n".join(self._render_candidate(candidate) for candidate in candidates)

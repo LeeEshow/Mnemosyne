@@ -20,14 +20,13 @@ from application.register_domain_use_case import RegisterDomainRequest, Register
 from application.save_memory_use_case import SaveMemoryRequest, SaveMemoryUseCase
 from application.search_memories_use_case import SearchMemoriesRequest, SearchMemoriesUseCase
 from application.startup_checks import verify_stored_embedding_dimension
-from domain.exceptions import DomainNotRegisteredError
 from domain.models import Domain, Memory
 from domain.ports.memory_repository import MemoryRepository
 from infrastructure.firestore_domain_repository import FirestoreDomainRepository
 from infrastructure.firestore_memory_repository import FirestoreMemoryRepository
 from infrastructure.gemini_gate_classifier import GeminiGateClassifier
 from infrastructure.vertex_embedding_provider import VertexEmbeddingProvider
-from interface import key_auth_middleware, tool_schemas
+from interface import key_auth_middleware, tool_errors, tool_schemas
 
 _INSTRUCTIONS = """\
 Mnemosyne long-term memory rules:
@@ -119,6 +118,7 @@ def _ensure_within_max_length(field_name: str, value: str) -> None:
 @mcp_server.tool(
     description="Store long-term memory. If result is 'conflict_detected' or 'requires_registration', pause and confirm with user before proceeding."
 )
+@tool_errors.translate_tool_errors(read_only=False)
 async def save_memory(
     domain: tool_schemas.SaveMemoryDomain,
     title: tool_schemas.SaveMemoryTitle,
@@ -139,10 +139,7 @@ async def save_memory(
         tags=tuple(tags) if tags else None,
         importance_score=importance_score,
     )
-    try:
-        result = await _dependencies().save_memory.execute(request)
-    except ValueError as error:
-        raise ToolError(str(error)) from error
+    result = await _dependencies().save_memory.execute(request)
     return tool_schemas.SaveMemoryResponse(
         decision=result.decision.value,
         doc_id=result.memory_id,
@@ -155,6 +152,7 @@ async def save_memory(
 @mcp_server.tool(
     description="Retrieve relevant memories by semantic similarity. Provide exact_tags for precise technical strings (error codes, function names, ticker symbols)."
 )
+@tool_errors.translate_tool_errors(read_only=True)
 async def search_memories(
     domain: tool_schemas.SearchMemoriesDomain,
     query: tool_schemas.SearchMemoriesQuery,
@@ -173,50 +171,52 @@ async def search_memories(
         include_superseded=include_superseded,
         include_archived=include_archived,
     )
-    try:
-        result = await _dependencies().search_memories.execute(request)
-    except DomainNotRegisteredError as error:
-        raise ToolError(str(error)) from error
+    result = await _dependencies().search_memories.execute(request)
     return tool_schemas.SearchMemoriesResponse(memories=[_to_memory_view(m) for m in result.memories])
 
 
 @mcp_server.tool(
     description="Archive or permanently delete a memory by doc_id. Search for it first to obtain the doc_id."
 )
+@tool_errors.translate_tool_errors(read_only=False)
 async def forget_memory(
     doc_id: tool_schemas.ForgetMemoryDocId,
     hard_delete: tool_schemas.ForgetMemoryHardDelete = False,
-) -> None:
+) -> tool_schemas.MemoryActionResponse:
     request = ForgetMemoryRequest(memory_id=doc_id, hard_delete=hard_delete)
-    await _dependencies().forget_memory.execute(request)
+    active_id = await _dependencies().forget_memory.execute(request)
+    return tool_schemas.MemoryActionResponse(doc_id=active_id, action="deleted" if hard_delete else "archived")
 
 
 @mcp_server.tool(
     description="Mark a memory as always-available (pinned=True) or remove that mark (pinned=False). Search for it first to obtain the doc_id."
 )
-async def pin_memory(doc_id: tool_schemas.PinMemoryDocId, pinned: tool_schemas.PinMemoryPinned = True) -> None:
-    await _dependencies().pin_memory.execute(doc_id, pinned=pinned)
+@tool_errors.translate_tool_errors(read_only=False)
+async def pin_memory(
+    doc_id: tool_schemas.PinMemoryDocId, pinned: tool_schemas.PinMemoryPinned = True
+) -> tool_schemas.MemoryActionResponse:
+    active_id = await _dependencies().pin_memory.execute(doc_id, pinned=pinned)
+    return tool_schemas.MemoryActionResponse(doc_id=active_id, action="pinned" if pinned else "unpinned")
 
 
 @mcp_server.tool(
     description="Load pinned memories at session start. Call once per session only."
 )
+@tool_errors.translate_tool_errors(read_only=True)
 async def load_pinned_memories(
     domain: tool_schemas.LoadPinnedMemoriesDomain,
     limit: tool_schemas.LoadPinnedMemoriesLimit = 5,
 ) -> tool_schemas.SearchMemoriesResponse:
     request = LoadPinnedMemoriesRequest(domain=domain, limit=limit)
-    try:
-        memories = await _dependencies().load_pinned_memories.execute(request)
-    except DomainNotRegisteredError as error:
-        raise ToolError(str(error)) from error
+    memories = await _dependencies().load_pinned_memories.execute(request)
     return tool_schemas.SearchMemoriesResponse(memories=[_to_memory_view(m) for m in memories])
 
 
 @mcp_server.tool(
     description="List all registered domains."
 )
-async def list_domains() -> tool_schemas.ListDomainsResponse:
+@tool_errors.translate_tool_errors(read_only=True)
+async def list_domains() ->tool_schemas.ListDomainsResponse:
     domains = await _dependencies().list_domains.execute()
     return tool_schemas.ListDomainsResponse(domains=[_to_domain_view(d) for d in domains])
 
@@ -224,15 +224,13 @@ async def list_domains() -> tool_schemas.ListDomainsResponse:
 @mcp_server.tool(
     description="Register a new domain. Call only after explicit user confirmation."
 )
+@tool_errors.translate_tool_errors(read_only=False)
 async def register_domain(
     name: tool_schemas.RegisterDomainName,
     description: tool_schemas.RegisterDomainDescription,
 ) -> tool_schemas.RegisterDomainResponse:
     request = RegisterDomainRequest(name=name, description=description)
-    try:
-        result = await _dependencies().register_domain.execute(request)
-    except ValueError as error:
-        raise ToolError(str(error)) from error
+    result = await _dependencies().register_domain.execute(request)
     return tool_schemas.RegisterDomainResponse(
         domain=_to_domain_view(result.domain), already_registered=result.already_registered
     )

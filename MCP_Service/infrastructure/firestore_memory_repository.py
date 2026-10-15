@@ -2,18 +2,22 @@ import asyncio
 from dataclasses import replace
 
 from firebase_admin import firestore
+from google.api_core import exceptions as api_exceptions
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from google.cloud.firestore_v1.vector import Vector
 
 import config
+from domain.exceptions import MemoryNotFoundError
 from domain.models import Memory, MemoryContentUpdate, MemoryStatus, MemoryStatusFilter, ScoredMemory
 from infrastructure import firebase_app
+from infrastructure.upstream_errors import translating_firestore_errors
 
 _DISTANCE_FIELD = "_vector_distance"
 
 
+@translating_firestore_errors
 class FirestoreMemoryRepository:
     def __init__(self) -> None:
         firebase_app.ensure_initialized()
@@ -94,7 +98,10 @@ class FirestoreMemoryRepository:
         await self._update(memory_id, {"access_count": increment})
 
     async def _update(self, memory_id: str, fields: dict) -> None:
-        await asyncio.to_thread(self._collection.document(memory_id).update, fields)
+        try:
+            await asyncio.to_thread(self._collection.document(memory_id).update, fields)
+        except api_exceptions.NotFound as error:
+            raise MemoryNotFoundError(memory_id) from error
 
     def _find_nearest_by_status(
         self, domain: str, embedding: tuple[float, ...], limit: int, status: MemoryStatus
